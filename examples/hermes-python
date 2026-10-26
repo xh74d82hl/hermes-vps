@@ -1,0 +1,20 @@
+#!/bin/sh
+# hermes-python — run a script with the Hermes environment venv that can import the given deps.
+#
+# Why this exists: the gateway runs its own Python (~/.hermes/tools/python-*/), while skill
+# scripts started from a login shell get the system Python. Anything that needs google-api-python-
+# client / google-auth-oauthlib (Google skills) or edge-tts must use the venv interpreter.
+#
+# Usage:  hermes-python path/to/script.py [args...]
+# Install: cp examples/hermes-python ~/.local/bin/hermes-python && chmod 755 ~/.local/bin/hermes-python
+
+for p in "$HOME"/.hermes/installs/*/environments/*/venv/bin/python3; do
+  [ -x "$p" ] || continue
+  if "$p" -c 'import googleapiclient, google_auth_oauthlib, google.auth' >/dev/null 2>&1; then
+    exec "$p" "$@"
+  fi
+done
+
+echo "hermes-python: no environment venv with Google libs found" >&2
+echo "hint: install deps with ~/.hermes/tools/uv-*/uv pip install --python <venv>/bin/python3 google-api-python-client google-auth-oauthlib" >&2
+exit 1

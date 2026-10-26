@@ -1,0 +1,51 @@
+# Config snippets for ~/.hermes/config.yaml (agent user).
+# Copy the blocks you need, then run:  hermes config check  &&  hermes gateway restart
+#
+# The file is large and heavily commented; paste these blocks at the end of it, keeping the
+# indentation exactly as below (two spaces per level).
+
+# ----------------------------------------------------------------------------- chat model
+model:
+  default: "deepseek-v4.1-flash"
+  provider: "opencode-go"
+  base_url: "https://opencode.ai/zen/go/v1"
+
+# Used when the primary errors out / rate-limits. Cheapest sensible chain: strong model first,
+# free model as safety net (or the reverse if you prefer $0 over quality).
+fallback_providers:
+  - provider: "opencode-go"
+    model: "beam-free"
+
+# ----------------------------------------------------------------------------- speech -> text
+# Provider: groq (free tier, needs GROQ_API_KEY) | local (free, faster-whisper, uses CPU)
+#           | openai | mistral | elevenlabs | deepinfra | xai
+stt:
+  enabled: true
+  provider: "groq"
+  # Global language hint. Whisper auto-detect misreads short/quiet clips; set your language.
+  # "" = auto-detect.
+  language: "it"
+  groq:
+    model: "whisper-large-v3-turbo"   # fast | "whisper-large-v3" = slower, more accurate
+    # language: ""                    # per-provider override, wins over stt.language
+
+# ----------------------------------------------------------------------------- text -> speech
+# Provider: edge (free, no key, Microsoft neural voices) | piper / kittentts (local)
+#           | openai | elevenlabs | gemini | minimax | mistral
+tts:
+  provider: "edge"
+  edge:
+    voice: "it-IT-ElsaNeural"
+    # Italian: it-IT-ElsaNeural (f), it-IT-IsabellaNeural (f), it-IT-DiegoNeural (m),
+    #          it-IT-FabioNeural (m), it-IT-GiuseppeNeural (m)
+    # English: en-US-AriaNeural (f), en-US-BrianNeural (m)
+    # Full list: edge-tts --list-voices
+
+# ----------------------------------------------------------------------------- voice replies
+# false = nothing is voiced automatically. Voice in -> text out (the sane default).
+# Opt in per chat at runtime:  /voice on  (voice in -> voice out)  |  /voice tts  (everything)
+#                              /voice off (back to text)
+# WARNING: true makes the runner voice *every* reply, including typed messages, which looks
+# like doubled voice+text. Leave it false and use /voice per chat.
+voice:
+  auto_tts: false

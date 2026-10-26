@@ -1,0 +1,29 @@
+# Local instance file (public SSH key lives there, but it is per-box)
+vars.env
+
+# Never commit environment files or credentials. Examples stay.
+*.env
+!*.example.env
+.env.*
+!.env.example
+
+# Keys and tokens
+*.key
+*.pem
+*.p12
+*client_secret*.json
+*google_token*.json
+*token*.json
+credentials*
+
+# Personal data / this box's own working directories
+jobs/
+notes/
+*.bak
+*.bak.*
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
