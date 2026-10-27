@@ -129,6 +129,9 @@ case "$TIMERS" in *hermes-backup*)
   systemctl is-enabled hermes-backup.timer >/dev/null 2>&1 && ok "timer enabled" || warn "timer not enabled"
   [ -f /etc/hermes-backup.env ] && [ "$(stat -c '%a' /etc/hermes-backup.env)" = 600 ] \
     && ok "/etc/hermes-backup.env 600" || warn "/etc/hermes-backup.env missing or not 600"
+  grep -q '^HEARTBEAT_URL=.' /etc/hermes-backup.env 2>/dev/null \
+    && ok "external heartbeat configured" \
+    || warn "no HEARTBEAT_URL (a dead VPS cannot alert you — see SETUP.md 8)"
   systemctl is-failed --quiet hermes-backup.service 2>/dev/null && bad "last backup run failed"
   # A timer can be healthy while every upload fails: require a recent, readable snapshot.
   if [ -f /etc/hermes-backup.env ] && command -v restic >/dev/null 2>&1; then

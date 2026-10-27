@@ -12,6 +12,13 @@ cat > /usr/local/sbin/hermes-backup <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 set -a; . /etc/hermes-backup.env; set +a
+# Dead-man's switch: a VPS that is off cannot send you a Telegram alert, so the backup
+# checks in with an external service every night and SILENCE is the alarm.
+# HEARTBEAT_URL is optional (Healthchecks.io style; the free tier allows 20 checks).
+HEARTBEAT="\${HEARTBEAT_URL:-}"
+hb() { [ -n "\$HEARTBEAT" ] && curl -fsS -m 10 --retry 2 "\$1" >/dev/null 2>&1 || true; }
+hb "\$HEARTBEAT/start"
+trap 'hb "\$HEARTBEAT/fail"' ERR
 SRC="/home/$AGENT_USER/.hermes"
 DUMP=/var/backups/hermes-dbs
 mkdir -p "\$DUMP"; chmod 700 "\$DUMP"
@@ -28,6 +35,7 @@ restic backup \${RESTIC_EXTRA_ARGS:-} --tag hermes \\
   --exclude "\$SRC/audio_cache" \\
   --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' \\
   "\$SRC" "\$DUMP" \$(for d in ${BACKUP_EXTRA_PATHS:-}; do [ -e "\$d" ] && echo "\$d"; done)
+hb "\$HEARTBEAT"
 EOF
 chmod 700 /usr/local/sbin/hermes-backup
 
@@ -38,3 +46,9 @@ restic snapshots >/dev/null 2>&1 || restic init
 systemctl enable --now hermes-backup.timer
 echo "Test now: sudo systemctl start hermes-backup.service && sudo restic -r \$RESTIC_REPOSITORY snapshots"
 echo "SAVE RESTIC_PASSWORD in your password manager: without it the backup is unrecoverable."
+if grep -q '^HEARTBEAT_URL=.' /etc/hermes-backup.env 2>/dev/null; then
+  echo "Heartbeat: configured — silence from the external service now means the VPS is dead."
+else
+  echo "Heartbeat: not configured. A dead VPS cannot alert you; add HEARTBEAT_URL to"
+  echo "           /etc/hermes-backup.env (see SETUP.md section 8) to close that hole."
+fi

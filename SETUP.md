@@ -386,7 +386,20 @@ sudo sh -c '. /etc/hermes-backup.env; restic snapshots'
 systemctl list-timers | grep hermes-backup
 ```
 
-4. Do one **test restore** into `/tmp` before you trust it.
+4. Close the one hole the server cannot close by itself — **a dead VPS sends no alert**.
+   Create a free check at [healthchecks.io](https://healthchecks.io) (20 checks, no card), set
+   its period to 1 day and a grace of 2 hours, enable the email and/or Telegram integration, then
+   put its ping URL in `/etc/hermes-backup.env`:
+
+   ```bash
+   sudo nano /etc/hermes-backup.env      # HEARTBEAT_URL=https://hc-ping.com/<uuid>
+   ```
+
+   The backup now pings `/start` when it begins, the bare URL on success and `/fail` on error.
+   If none arrives, the external service tells you — exactly the case the local alert channel
+   cannot cover. It is one `curl`: no model, no tokens.
+
+5. Do one **test restore** into `/tmp` before you trust it.
 
 > `RESTIC_PASSWORD` is the only key to the backup. Lose it and the data is gone forever.
 > Store it in your password manager, not only on the VPS.
