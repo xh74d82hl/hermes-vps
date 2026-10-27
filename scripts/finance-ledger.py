@@ -533,98 +533,120 @@ def literal_category(name: str) -> str:
     return ""
 
 
-def ateco_lookup(name: str) -> dict:
-    """Search the web for a company's ATECO code without a browser.
+def _secret(name: str) -> str:
+    """Read a key from the environment or from ~/.hermes/.env, never printing it."""
+    value = os.environ.get(name, "")
+    if value:
+        return value
+    env_file = HERMES_HOME / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith(name + "="):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    return ""
 
-    DuckDuckGo's HTML endpoint is enough for "name + codice ateco"; the snippets from
-    ufficiocamerale / reportaziende / registroaziende usually contain the code.
-    Returns candidates already mapped to a category, so the agent never picks one.
+
+def _codes_from_text(text: str) -> dict[str, str]:
+    """Pull ATECO codes out of page text and map them, keeping the order of appearance."""
+    found: dict[str, str] = {}
+    for m in re.finditer(r"ateco\s*:?\s*(\d{2}(?:[.\s]\d{1,2}){0,2}|\d{6})", text, re.I):
+        code = m.group(1).replace(" ", "")
+        if len(code) == 6 and "." not in code:
+            code = f"{code[:2]}.{code[2:4]}.{code[4:]}"
+        found.setdefault(code, category_from_ateco(code))
+    if any("." in c or len(c) == 6 for c in found):
+        found = {c: v for c, v in found.items() if "." in c or len(c) == 6}
+    return found
+
+
+def _tavily(key: str, path: str, body: dict) -> dict:
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"https://api.tavily.com/{path}", data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+
+
+def ateco_lookup(name: str) -> dict:
+    """Find a company's ATECO code with plain HTTP calls, no browser.
+
+    A registry page is the only source that reliably carries the code, so the first
+    query is scoped to ufficiocamerale; generic "ateco" queries mostly match other
+    companies that happen to be called Ateco.
     """
+    queries = [f'site:ufficiocamerale.it "{name}"',
+               f'site:reportaziende.it "{name}"',
+               f'{name} "codice ateco"']
+    key = _secret("TAVILY_API_KEY")
+    if key:
+        texts: list[str] = []
+        urls: list[str] = []
+        engine = "tavily"
+        try:
+            for query in queries:
+                data = _tavily(key, "search", {"query": query, "max_results": 5,
+                                               "search_depth": "basic"})
+                for r in data.get("results", []):
+                    texts.append(f"{r.get('title','')} {r.get('content','')} {r.get('url','')}")
+                    urls.append(r.get("url", ""))
+                codes = _codes_from_text(" ".join(texts))
+                if codes:
+                    break
+            if not codes:
+                # the search excerpt is often truncated before the ATECO line
+                for url in urls[:4]:
+                    if re.search(r"ufficiocamerale|reportaziende|registroaziende|"
+                                 r"informazione-aziende|aziende\.it", url):
+                        try:
+                            page = _tavily(key, "extract", {"urls": [url]})
+                            body = " ".join(r.get("raw_content", "") for r in page.get("results", []))
+                            texts.append(body)
+                            codes = _codes_from_text(body)
+                        except Exception:
+                            continue
+                        if codes:
+                            break
+            snippets = [t[max(0, t.lower().find("ateco") - 90):
+                          t.lower().find("ateco") + 110]
+                        for t in texts if "ateco" in t.lower()][:3]
+            return {"name": name, "queries": queries, "engine": engine,
+                    "codes": codes, "snippets": snippets,
+                    "error": "" if codes or texts else "tavily: nessun risultato"}
+        except Exception as exc:
+            fallback_error = f"tavily: {str(exc)[:80]}"
+    else:
+        fallback_error = "nessuna chiave TAVILY_API_KEY"
+
+    # Last resort: scrape Brave/DDG HTML. Usually rate-limited from a datacenter IP,
+    # so this only helps on a small VPS or a home connection.
     import urllib.parse
     import urllib.request
 
     query = f"{name} codice ateco"
-
-    # A free search API is the only reliable option from a datacenter IP: the HTML
-    # endpoints of Brave/DDG rate-limit or return a bot page. Key lives in ~/.hermes/.env.
-    key = os.environ.get("BRAVE_API_KEY", "")
-    if not key:
-        env_file = HERMES_HOME / ".env"
-        if env_file.exists():
-            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-                if line.startswith("BRAVE_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
-    if key:
-        api = ("https://api.search.brave.com/res/v1/web/search?count=5&q="
-               + urllib.parse.quote_plus(query))
-        try:
-            payload = urllib.request.urlopen(urllib.request.Request(
-                api, headers={"Accept": "application/json",
-                              "X-Subscription-Token": key}), timeout=20).read()
-            data = json.loads(payload)
-            text = " ".join(
-                f"{r.get('title','')} {r.get('description','')} {r.get('url','')}"
-                for r in (data.get("web", {}) or {}).get("results", []))
-            found: dict[str, str] = {}
-            for m in re.finditer(r"[Aa]teco\s*:?\s*(\d{2}(?:[.\s]\d{1,2}){0,2}|\d{6})", text):
-                code = m.group(1).replace(" ", "")
-                if len(code) == 6 and "." not in code:
-                    code = f"{code[:2]}.{code[2:4]}.{code[4:]}"
-                found.setdefault(code, category_from_ateco(code))
-            snippets = [text[max(0, m.start() - 90): m.end() + 110]
-                        for m in list(re.finditer(r"[Aa]teco", text))[:3]]
-            return {"name": name, "query": query, "engine": "brave-api",
-                    "codes": found, "snippets": snippets}
-        except Exception as exc:
-            pass  # fall through to the HTML engines
-
-    engines = [
-        ("brave", "https://search.brave.com/search?q=" + urllib.parse.quote_plus(query)),
-        ("ddg", "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote_plus(query)),
-    ]
-    text, used, errors = "", "", []
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
         "Accept-Language": "it-IT,it;q=0.9,en;q=0.6",
     }
-    import time
-
-    for attempt in range(2):          # free HTML endpoints rate-limit; one retry is cheap
-        for label, url in engines:
-            try:
-                raw = urllib.request.urlopen(
-                    urllib.request.Request(url, headers=headers), timeout=20
-                ).read().decode("utf-8", "replace")
-            except Exception as exc:
-                errors.append(f"{label}: {str(exc)[:60]}")
-                time.sleep(4)
-                continue
-            candidate = re.sub(r"<[^>]+>", " ", raw)
-            candidate = re.sub(r"\s+", " ", html.unescape(candidate))
-            if "ateco" in candidate.lower() and len(candidate) > 2000:
-                text, used = candidate, label
-                break
-            errors.append(f"{label}: nessun risultato utile")
-            time.sleep(3)
-        if text:
-            break
-        time.sleep(6)
-    if not text:
-        return {"name": name, "query": query, "codes": {}, "error": "; ".join(errors[:3])}
-    found: dict[str, str] = {}
-    for m in re.finditer(r"[Aa]teco\s*:?\s*(\d{2}(?:[.\s]\d{1,2}){0,2}|\d{6})", text):
-        code = m.group(1).replace(" ", "")
-        if len(code) == 6 and "." not in code:
-            code = f"{code[:2]}.{code[2:4]}.{code[4:]}"
-        found.setdefault(code, category_from_ateco(code))
-    # "Ateco: 471102" also yields the bare "47"; keep the specific codes only
-    if any("." in c or len(c) == 6 for c in found):
-        found = {c: v for c, v in found.items() if "." in c or len(c) == 6}
-    snippets = [text[max(0, m.start() - 90): m.end() + 110]
-                for m in list(re.finditer(r"[Aa]teco", text))[:3]]
-    return {"name": name, "query": query, "engine": used, "codes": found,
-            "snippets": snippets}
+    errors = [fallback_error]
+    for url in ("https://search.brave.com/search?q=" + urllib.parse.quote_plus(query),
+                "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote_plus(query)):
+        try:
+            raw = urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=20
+            ).read().decode("utf-8", "replace")
+        except Exception as exc:
+            errors.append(f"{url.split('/')[2]}: {str(exc)[:50]}")
+            continue
+        text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", raw)))
+        codes = _codes_from_text(text)
+        if codes:
+            return {"name": name, "queries": [query], "engine": "html",
+                    "codes": codes, "snippets": [], "error": ""}
+        errors.append(f"{url.split('/')[2]}: nessun codice")
+    return {"name": name, "queries": [query], "engine": "html", "codes": {},
+            "snippets": [], "error": "; ".join(errors[:4])}
 
 
 def rekey(conn: sqlite3.Connection) -> int:
