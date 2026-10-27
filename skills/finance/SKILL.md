@@ -105,7 +105,7 @@ model call can classify them all:
 
 ```bash
 finance-ledger enrich --limit 15
-echo '[{"key":"...","category":"Svago","confidence":0.9,"source":"ticketsms.it"}]' \
+echo '[{"key":"...","category":"Svago","confidence":0.9,"source":"esempio.it"}]' \
   | finance-ledger classify-batch
 ```
 
@@ -138,7 +138,7 @@ Then:
    yourself, or the classification lands on nothing:
    ```bash
    finance-ledger classify --key "<key from pending>" --name "Nome leggibile" \
-     --category "Svago" --source "ticketsms.it" --confidence 0.9 --by agent
+     --category "Svago" --source "esempio.it" --confidence 0.9 --by agent
    ```
 3. **Companies with a legal form**: prefer the ATECO code when one is found, because
    it is objective:
