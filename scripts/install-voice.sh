@@ -12,6 +12,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$HERE/vars.env"
 AGENT_USER="${AGENT_USER:?}"
 AGENT_HOME="/home/$AGENT_USER"
+# Neutral cwd: uv discovers pyproject.toml / uv.toml by walking up from the current directory, and
+# as the agent user it cannot read the admin's home (this cost us a "Permission denied: uv.toml").
+cd /
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -46,17 +49,19 @@ for u in "$AGENT_HOME"/.hermes/tools/uv-*/uv; do
   UV="$u"
 done
 if [ -n "$UV" ]; then
-  sudo -u "$AGENT_USER" "$UV" pip install --python "$PY" edge-tts
+  sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" "$UV" pip install --python "$PY" edge-tts
 else
-  sudo -u "$AGENT_USER" "$PY" -m pip install --user edge-tts
+  sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" "$PY" -m pip install --user edge-tts
 fi
 
 log "Verify"
-sudo -u "$AGENT_USER" "$PY" -c "import edge_tts; print('edge_tts OK', edge_tts.__file__)"
+sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" "$PY" -c "import edge_tts; print('edge_tts OK', edge_tts.__file__)"
 
 log "Smoke test (Italian, no network model needed)"
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-sudo -u "$AGENT_USER" "$PY" -m edge_tts --voice it-IT-ElsaNeural \
+TMP="$(mktemp -d)"
+chown "$AGENT_USER" "$TMP"   # the smoke test runs as the agent user; this dir is created by root
+trap 'rm -rf "$TMP"' EXIT
+sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" "$PY" -m edge_tts --voice it-IT-ElsaNeural \
   --text "Ciao, il test vocale funziona." --write-media "$TMP/a.mp3" >/dev/null
 ffmpeg -y -loglevel error -i "$TMP/a.mp3" -c:a libopus -b:a 48k "$TMP/a.ogg"
 echo "OK: $(ls -l "$TMP/a.ogg" | awk '{print $5}') bytes of Ogg/Opus"

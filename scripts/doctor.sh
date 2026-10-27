@@ -22,7 +22,7 @@ head_ "System"
 printf '  %s | %s | load %s\n' "$(hostname)" "$(. /etc/os-release && echo "$PRETTY_NAME")" "$(cut -d' ' -f1-3 /proc/loadavg)"
 free -h | sed -n '1,2p' | sed 's/^/  /'
 df -h / | tail -1 | sed 's/^/  /'
-swapon --show | grep -q . && ok "swap active" || bad "no swap"
+[ -n "$(swapon --show 2>/dev/null)" ] && ok "swap active" || bad "no swap"
 
 head_ "SSH hardening"
 if [ -f /etc/ssh/sshd_config.d/00-hardening.conf ]; then
@@ -37,27 +37,28 @@ fi
 
 head_ "Firewall"
 if command -v ufw >/dev/null 2>&1; then
-  if ufw status | grep -q 'Status: active'; then
+  UFW_STATUS="$(ufw status 2>/dev/null || true)"
+  case "$UFW_STATUS" in *'Status: active'*)
     ok "ufw active"; ufw status numbered | grep -E 'ALLOW' | sed 's/^/        /'
-  else
-    bad "ufw inactive"
-  fi
+  ;;
+  *) bad "ufw inactive" ;;
+  esac
 else
   warn "ufw not installed"
 fi
 
 head_ "Users"
 id "$AGENT_USER" >/dev/null 2>&1 && ok "agent user $AGENT_USER exists" || bad "agent user $AGENT_USER missing"
-if id -nG "$AGENT_USER" 2>/dev/null | grep -qwE 'sudo|docker'; then
-  bad "$AGENT_USER is in sudo/docker group (should not be)"
-else
-  ok "$AGENT_USER has no sudo/docker"
-fi
-loginctl show-user "$AGENT_USER" -p Linger --value 2>/dev/null | grep -q yes \
+AGENT_GROUPS="$(id -nG "$AGENT_USER" 2>/dev/null || true)"
+case " $AGENT_GROUPS " in *' sudo '*|*' docker '*)
+  bad "$AGENT_USER is in sudo/docker group (should not be)" ;;
+  *) ok "$AGENT_USER has no sudo/docker" ;;
+esac
+[ "$(loginctl show-user "$AGENT_USER" -p Linger --value 2>/dev/null)" = yes ] \
   && ok "linger enabled (user services survive reboot)" || warn "linger disabled"
 
 head_ "Hermes gateway"
-if as_agent 'systemctl --user is-active hermes-gateway' 2>/dev/null | grep -q '^active'; then
+if [ "$(as_agent 'systemctl --user is-active hermes-gateway' 2>/dev/null)" = active ]; then
   ok "hermes-gateway active"
   as_agent 'systemctl --user show hermes-gateway -p ActiveEnterTimestamp --value'
 else
@@ -106,15 +107,38 @@ JOBS="$(as_agent 'hermes cron list 2>/dev/null | grep -c "\[active\]"')"
 [ "${JOBS:-0}" -ge 1 ] && ok "$JOBS active cron job(s)" || warn "no active cron jobs"
 
 head_ "Backups"
-if systemctl list-timers --all 2>/dev/null | grep -q hermes-backup; then
+TIMERS="$(systemctl list-timers --all 2>/dev/null || true)"
+case "$TIMERS" in *hermes-backup*)
   ok "hermes-backup.timer installed"
   systemctl is-enabled hermes-backup.timer >/dev/null 2>&1 && ok "timer enabled" || warn "timer not enabled"
   [ -f /etc/hermes-backup.env ] && [ "$(stat -c '%a' /etc/hermes-backup.env)" = 600 ] \
     && ok "/etc/hermes-backup.env 600" || warn "/etc/hermes-backup.env missing or not 600"
   systemctl is-failed --quiet hermes-backup.service 2>/dev/null && bad "last backup run failed"
-else
-  warn "no backup timer (run scripts/setup-backup.sh)"
-fi
+  # A timer can be healthy while every upload fails: require a recent, readable snapshot.
+  if [ -f /etc/hermes-backup.env ] && command -v restic >/dev/null 2>&1; then
+    AGE_H="$(
+      set -a; . /etc/hermes-backup.env; set +a
+      HOME=/root restic snapshots --latest 1 --json 2>/dev/null | python3 -c '
+import sys, json, datetime
+try:
+    snaps = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+if not snaps:
+    raise SystemExit(0)
+t = datetime.datetime.fromisoformat(snaps[-1]["time"].replace("Z", "+00:00"))
+print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 3600))
+' 2>/dev/null
+    )"
+    case "$AGE_H" in
+      ''|*[!0-9]*) bad "cannot read snapshots from the repository (credentials? network?)" ;;
+      *) if [ "$AGE_H" -le 36 ]; then ok "latest snapshot ${AGE_H}h old"
+         else bad "latest snapshot ${AGE_H}h old (expected under 36h)"; fi ;;
+    esac
+  fi
+;;
+  *) warn "no backup timer (run scripts/setup-backup.sh)" ;;
+esac
 
 printf '\n'
 [ "$FAIL" -eq 0 ] && echo "All clear ($FAIL failures)." || echo "$FAIL check(s) FAILED."
