@@ -55,7 +55,8 @@ sudo /opt/hermes-vps/scripts/install-hermes.sh
 
 Then follow **[SETUP.md](SETUP.md)** step by step: Hermes setup, Telegram, model, Google,
 voice, the 07:00 job and backups. **[TROUBLESHOOTING.md](TROUBLESHOOTING.md)** collects the
-traps we actually hit while building this.
+traps we actually hit while building this. **[RESTORE.md](RESTORE.md)** is what you open the day the
+VPS dies.
 
 ## Layout
 
@@ -73,6 +74,7 @@ examples/                 config snippets, venv wrapper, morning-brief prompt
 backup.example.env        template for /etc/hermes-backup.env
 SETUP.md                  the step-by-step walkthrough
 TROUBLESHOOTING.md        gotchas, symptoms, fixes
+RESTORE.md                recovering the agent after the box dies
 ```
 
 ## Security model

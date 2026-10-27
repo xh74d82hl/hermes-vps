@@ -16,13 +16,16 @@ SRC="/home/$AGENT_USER/.hermes"
 DUMP=/var/backups/hermes-dbs
 mkdir -p "\$DUMP"; chmod 700 "\$DUMP"
 # Consistent copies of live SQLite DBs (WAL-safe).
+# NOTE: the copy gets a .dump suffix on purpose — the *.db exclude below would otherwise
+# drop the dumps too, and you would back up the config but not the actual memory/state.
 find "\$SRC" -name '*.db' -not -path '*/hermes-agent/*' 2>/dev/null | while read -r db; do
-  out="\$DUMP/\$(echo "\${db#\$SRC/}" | tr '/' '_')"
+  out="\$DUMP/\$(echo "\${db#\$SRC/}" | tr '/' '_').dump"
   sqlite3 "\$db" ".backup '\$out'"
 done
 restic backup \${RESTIC_EXTRA_ARGS:-} --tag hermes \\
-  --exclude "\$SRC/hermes-agent" --exclude "\$SRC/tools" --exclude "\$SRC/logs" \\
-  --exclude "\$SRC/image_cache" --exclude "\$SRC/audio_cache" \\
+  --exclude "\$SRC/hermes-agent" --exclude "\$SRC/tools" --exclude "\$SRC/installs" \\
+  --exclude "\$SRC/logs" --exclude "\$SRC/cache" --exclude "\$SRC/image_cache" \\
+  --exclude "\$SRC/audio_cache" \\
   --exclude '*.db' --exclude '*.db-wal' --exclude '*.db-shm' \\
   "\$SRC" "\$DUMP" \$(for d in ${BACKUP_EXTRA_PATHS:-}; do [ -e "\$d" ] && echo "\$d"; done)
 EOF
