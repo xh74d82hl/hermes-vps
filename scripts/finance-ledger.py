@@ -241,11 +241,13 @@ def parse_statement(path: Path) -> Statement:
 
 def merchant_key(raw: str) -> str:
     s = raw.lower()
-    s = re.sub(r"\b(sumup|paypal|sq \*|lime\*|amzn mktp|pos|pagamento|acquisto|addebito)\b", " ", s)
-    s = re.sub(r"\b[a-z]*\d{3,}\b", " ", s)
-    s = re.sub(r"\*[^*]*$", " ", s)
+    # drop the payment processor, keep the merchant that follows it
+    s = re.sub(r"\b(sumup|paypal|sq|amex|visa|maestro|nexive|nexi|satispay)\b\s*\*?\s*", " ", s)
+    s = re.sub(r"\b(lime\*?|amzn mktp|pos|pagamento|acquisto|addebito)\b", " ", s)
+    s = re.sub(r"\b[a-z]{0,3}\d{3,}\b", " ", s)          # store ids / phone numbers
     s = re.sub(r"[^a-zàèéìòù\s]", " ", s)
-    return re.sub(r"\s+", " ", s).strip()[:60] or "sconosciuto"
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:60] or "sconosciuto"
 
 
 def bucket_for(amount: float, merchant: str) -> str:
@@ -413,6 +415,22 @@ def classify(conn: sqlite3.Connection, key: str, name: str, category: str,
     conn.commit()
 
 
+def rekey(conn: sqlite3.Connection) -> int:
+    """Recompute merchant keys after a change to the normaliser."""
+    rows = conn.execute("SELECT id, merchant_raw, merchant_key FROM txn").fetchall()
+    changed = 0
+    for r in rows:
+        key = merchant_key(r["merchant_raw"])
+        if key != r["merchant_key"]:
+            conn.execute("UPDATE txn SET merchant_key=? WHERE id=?", (key, r["id"]))
+            changed += 1
+        conn.execute("INSERT OR IGNORE INTO merchant (key, name) VALUES (?,?)",
+                     (key, r["merchant_raw"]))
+    conn.execute("DELETE FROM merchant WHERE key NOT IN (SELECT DISTINCT merchant_key FROM txn)")
+    conn.commit()
+    return changed
+
+
 def summary(conn: sqlite3.Connection) -> dict:
     one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
     sp = lambda b, s: round(one(
@@ -436,24 +454,65 @@ def summary(conn: sqlite3.Connection) -> dict:
 # --------------------------------------------------------------------------- dashboard
 
 CSS = """
-:root{--ink:#1b1b1d;--muted:#6c6c72;--line:#e4e4ea;--accent:#0b5cad;--warn:#a3441a;--ok:#1d7a4a}
+:root{
+  --ink:#191918; --muted:#6f6f6a; --rule:rgba(0,0,0,.09); --paper:#fbfaf7; --card:#fff;
+  --accent:#2f4f7a; --warn:#9c4a1f; --ok:#2f6b46;
+  --c1:#3a5f8f; --c2:#4f8a8b; --c3:#a8863f; --c4:#a05a4a; --c5:#7c6a9c; --c6:#b9b7ae;
+}
 *{box-sizing:border-box}
-body{margin:0;padding:32px;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-     color:var(--ink);background:#fafafa}
-h1{font-size:22px;margin:0 0 2px}h2{font-size:13px;margin:30px 0 8px;text-transform:uppercase;
-     letter-spacing:.07em;color:var(--muted)}
-.sub{color:var(--muted);font-size:13px;margin-bottom:22px}
-.grid{display:flex;gap:14px;flex-wrap:wrap}
-.card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 16px;min-width:150px}
-.card .k{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
-.card .v{font-size:22px;font-variant-numeric:tabular-nums;margin-top:2px}
-table{border-collapse:collapse;width:100%;background:#fff;border:1px solid var(--line);border-radius:10px;overflow:hidden}
-th,td{padding:7px 11px;text-align:left;border-bottom:1px solid var(--line);font-size:13.5px}
-th{background:#f3f3f6;font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
-td.n{text-align:right;font-variant-numeric:tabular-nums}tr:last-child td{border-bottom:none}
-.bar{height:7px;background:var(--accent);border-radius:4px}
-.ok{color:var(--ok)}.warn{color:var(--warn)}
-footer{margin-top:28px;color:var(--muted);font-size:11.5px}
+html,body{margin:0}
+body{background:var(--paper);color:var(--ink);
+  font:15px/1.5 ui-sans-serif,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  padding:40px 28px 64px;max-width:1060px;margin:0 auto;
+  -webkit-font-smoothing:antialiased;font-feature-settings:"tnum"}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:16px;
+  border-bottom:1px solid var(--rule);padding-bottom:14px;margin-bottom:26px}
+h1{font-size:20px;font-weight:600;letter-spacing:-.01em;margin:0}
+.stamp{color:var(--muted);font-size:12px;letter-spacing:.04em;text-transform:uppercase}
+h2{font-size:11px;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);
+  margin:38px 0 12px}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+.kpi{background:var(--card);border:1px solid var(--rule);border-radius:3px;padding:15px 16px 13px}
+.kpi .label{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
+.kpi .value{font-size:29px;line-height:1.15;margin-top:5px;letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums}
+.kpi .hint{font-size:12px;color:var(--muted);margin-top:3px}
+.kpi.accent{border-left:3px solid var(--accent)}
+.cols{display:grid;grid-template-columns:minmax(240px,300px) 1fr;gap:34px;align-items:center}
+.donut{display:block;margin:0 auto}
+.legend{list-style:none;margin:0;padding:0;font-size:13.5px}
+.legend li{display:flex;align-items:center;gap:9px;padding:4px 0}
+.legend .dot{width:9px;height:9px;border-radius:2px;flex:none}
+.legend .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.legend .v{font-variant-numeric:tabular-nums;color:var(--muted)}
+.bars{list-style:none;margin:0;padding:0}
+.bars li{display:grid;grid-template-columns:1fr 96px;gap:12px;align-items:center;padding:6px 0}
+.bars .fill{height:9px;background:var(--accent);border-radius:2px;opacity:.85}
+.bars .name{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bars .v{text-align:right;font-variant-numeric:tabular-nums;font-size:13.5px}
+.months{display:flex;gap:26px;align-items:flex-end;height:130px;padding:0 2px}
+.months .m{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;
+  gap:7px;flex:1;height:100%}
+.months .bar{width:100%;max-width:88px;background:var(--accent);border-radius:2px;opacity:.85}
+.months .lbl{font-size:12px;color:var(--muted)}
+.months .amt{font-size:12.5px;font-variant-numeric:tabular-nums}
+table{border-collapse:collapse;width:100%;background:var(--card);border:1px solid var(--rule)}
+th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--rule);font-size:13.5px}
+th{font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);
+  background:#f6f5f1;font-weight:600}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+tr:last-child td{border-bottom:none}
+.tag{display:inline-block;font-size:11px;letter-spacing:.05em;text-transform:uppercase}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.muted{color:var(--muted)}
+.empty{color:var(--muted);font-size:13.5px;padding:10px 0}
+footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--rule);
+  color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:12px}
+@media (max-width:720px){
+  body{padding:24px 16px 48px}
+  .kpis{grid-template-columns:repeat(2,1fr)}
+  .cols{grid-template-columns:1fr;gap:22px}
+  .kpi .value{font-size:24px}
+}
 """
 
 
@@ -462,104 +521,167 @@ def money(v: float) -> str:
     return ("-" if v < 0 else "") + "€ " + s
 
 
+def donut(segments: list[tuple[str, float, str]], total: float, center: str) -> str:
+    """Segments as (label, value, colour). Part-whole for a handful of categories."""
+    r, stroke = 62.0, 26.0
+    circ = 2 * 3.141592653589793 * r
+    parts, offset = [], 0.0
+    for _label, value, colour in segments:
+        frac = value / total if total else 0
+        length = circ * frac
+        parts.append(
+            f'<circle r="{r}" cx="90" cy="90" fill="none" stroke="{colour}" stroke-width="{stroke}"'
+            f' stroke-dasharray="{length:.2f} {circ - length:.2f}"'
+            f' stroke-dashoffset="{-offset:.2f}" transform="rotate(-90 90 90)"></circle>')
+        offset += length
+    return (
+        '<svg class="donut" width="180" height="180" viewBox="0 0 180 180" role="img">'
+        f'{"".join(parts)}'
+        '<text x="90" y="86" text-anchor="middle" font-size="15" fill="#191918"'
+        f' font-variant-numeric="tabular-nums">{html.escape(center)}</text>'
+        '<text x="90" y="105" text-anchor="middle" font-size="10.5" fill="#6f6f6a"'
+        ' letter-spacing="1.2">TOTALE</text>'
+        '</svg>')
+
+
 def report(conn: sqlite3.Connection, out: Path) -> dict:
     s = summary(conn)
     months = [r["m"] for r in conn.execute(
         "SELECT DISTINCT substr(date,1,7) m FROM txn ORDER BY m")]
-    by_month = conn.execute(
-        "SELECT substr(date,1,7) m, bucket, SUM(-amount) v FROM txn WHERE amount<0"
-        " GROUP BY m, bucket ORDER BY m").fetchall()
-    per_month = defaultdict(lambda: defaultdict(float))
-    for r in by_month:
-        per_month[r["m"]][r["bucket"]] += r["v"]
+    per_month = defaultdict(float)
+    for r in conn.execute(
+            "SELECT substr(date,1,7) m, SUM(-amount) v FROM txn WHERE bucket='purchase'"
+            " GROUP BY m"):
+        per_month[r["m"]] = r["v"]
 
     cats = conn.execute(
-        "SELECT category, SUM(-amount) v, COUNT(*) n FROM txn"
-        " WHERE bucket='purchase' GROUP BY category ORDER BY v DESC").fetchall()
-    top = conn.execute(
-        "SELECT m.name, COUNT(*) n, SUM(-t.amount) v FROM txn t JOIN merchant m ON m.key=t.merchant_key"
-        " WHERE t.bucket='purchase' GROUP BY m.key ORDER BY v DESC LIMIT 15").fetchall()
-    pending = pending_merchants(conn)
-    recent = conn.execute(
+        "SELECT category, SUM(-amount) v, COUNT(*) n FROM txn WHERE bucket='purchase'"
+        " GROUP BY category ORDER BY v DESC").fetchall()
+    palette = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"]
+    top_cats, rest = cats[:5], sum(c["v"] for c in cats[5:])
+    if rest > 0:
+        top_cats = list(top_cats) + [{"category": "Altre", "v": rest, "n": 0}]
+    segments = [(c["category"], c["v"], "#" + col) for c, col in
+                zip(top_cats, ["3a5f8f", "4f8a8b", "a8863f", "a05a4a", "7c6a9c", "b9b7ae"])]
+
+    merchants = conn.execute(
+        "SELECT m.name, COUNT(*) n, SUM(-t.amount) v FROM txn t"
+        " JOIN merchant m ON m.key=t.merchant_key WHERE t.bucket='purchase'"
+        " GROUP BY m.key ORDER BY v DESC LIMIT 8").fetchall()
+    statements = s["statements"]
+    days = 0
+    for st in statements:
+        if st["period_start"] and st["period_end"]:
+            a = date.fromisoformat(st["period_start"])
+            b = date.fromisoformat(st["period_end"])
+            days += max((b - a).days + 1, 0)
+    per_day = s["purchases"] / days if days else 0
+    unclassified_pct = (100 * s["unclassified"] / s["purchases"]) if s["purchases"] else 0
+
+    detail = conn.execute(
         "SELECT date, merchant_raw, category, bucket, amount, check_ok FROM txn"
-        " ORDER BY date DESC LIMIT 60").fetchall()
+        " ORDER BY date DESC LIMIT 80").fetchall()
 
-    parts = [f"<!doctype html><meta charset='utf-8'><title>Finance</title><style>{CSS}</style>",
-             "<h1>Finance</h1>",
-             f"<div class='sub'>{len(months)} mesi · {s['purchases'] and ''}"
-             f"{money(s['purchases'])} di acquisti · {money(s['unclassified'])} da classificare</div>",
-             "<div class='grid'>"]
-    for label, value in (("Acquisti", s["purchases"]), ("Entrate", s["income"]),
-                         ("Trasferimenti a persone", s["transfers"]),
-                         ("Movimenti interni (esclusi)", s["internal"]),
-                         ("Rimborsi", s["refunds"])):
-        parts.append(f"<div class='card'><div class='k'>{label}</div>"
-                     f"<div class='v'>{money(value)}</div></div>")
-    parts.append(f"<div class='card'><div class='k'>Righe non quadrate</div>"
-                 f"<div class='v {'warn' if s['bad_rows'] else 'ok'}'>{s['bad_rows']}</div></div></div>")
+    o = [f"<!doctype html><meta charset='utf-8'>"
+         f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
+         f"<title>Spese</title><style>{CSS}</style>",
+         "<header><h1>Spese</h1>"
+         f"<div class='stamp'>{len(months)} mesi · aggiornato {date.today().strftime('%d/%m/%Y')}</div>"
+         "</header>",
+         "<div class='kpis'>",
+         f"<div class='kpi accent'><div class='label'>Acquisti</div>"
+         f"<div class='value'>{money(s['purchases'])}</div>"
+         f"<div class='hint'>esclusi trasferimenti e movimenti interni</div></div>",
+         f"<div class='kpi'><div class='label'>Media al giorno</div>"
+         f"<div class='value'>{money(per_day)}</div>"
+         f"<div class='hint'>su {days} giorni di estratto</div></div>",
+         f"<div class='kpi'><div class='label'>Entrate</div>"
+         f"<div class='value'>{money(s['income'])}</div>"
+         f"<div class='hint'>stipendi e accrediti</div></div>",
+         f"<div class='kpi'><div class='label'>Da classificare</div>"
+         f"<div class='value'>{unclassified_pct:.0f}%</div>"
+         f"<div class='hint'>{money(s['unclassified'])} senza categoria</div></div>",
+         "</div>"]
 
-    parts.append("<h2>Estratti importati</h2><table><tr><th>File</th><th>Periodo</th><th>Righe</th>"
-                 "<th>Stato</th></tr>")
-    for st in s["statements"]:
-        state = ("<span class='ok'>quadra</span>" if st["reconciled"]
-                 else f"<span class='warn'>non quadra</span>")
+    o.append("<h2>Dove vanno gli acquisti</h2><div class='cols'>")
+    o.append(donut(segments, s["purchases"], money(s["purchases"]))
+             if segments else "<div class='empty'>nessun acquisto importato</div>")
+    o.append("<ul class='legend'>")
+    for (label, value, colour), cat in zip(segments, top_cats):
+        share = 100 * value / s["purchases"] if s["purchases"] else 0
+        o.append(f"<li><span class='dot' style='background:#{colour}'></span>"
+                 f"<span class='name'>{html.escape(label)}</span>"
+                 f"<span class='v'>{money(value)} · {share:.0f}%</span></li>")
+    o.append("</ul></div>")
+
+    o.append("<h2>Top esercenti</h2><ul class='bars'>")
+    top_v = max((m["v"] for m in merchants), default=0) or 1
+    for m in merchants:
+        o.append(f"<li><div><div class='name'>{html.escape(m['name'][:58])}</div>"
+                 f"<div class='fill' style='width:{100 * m['v'] / top_v:.1f}%'></div></div>"
+                 f"<div class='v'>{money(m['v'])}</div></li>")
+    o.append("</ul>")
+
+    if per_month:
+        o.append("<h2>Acquisti per mese</h2><div class='months'>")
+        top_m = max(per_month.values()) or 1
+        for m in sorted(per_month):
+            h = max(6, int(100 * per_month[m] / top_m))
+            o.append(f"<div class='m'><div class='amt'>{money(per_month[m])}</div>"
+                     f"<div class='bar' style='height:{h}%'></div>"
+                     f"<div class='lbl'>{m}</div></div>")
+        o.append("</div>")
+
+    o.append("<h2>Estratti</h2><table><tr><th>File</th><th>Periodo</th><th class='n'>Righe</th>"
+             "<th>Stato</th></tr>")
+    for st in statements:
+        state = ("<span class='tag ok'>quadra</span>" if st["reconciled"]
+                 else "<span class='tag warn'>non quadra</span>")
         if st["partial"]:
-            state += " <span class='muted'>· parziale</span>"
-        parts.append(f"<tr><td>{html.escape(st['filename'][:44])}</td>"
-                     f"<td>{st['period_start']} → {st['period_end']}</td>"
-                     f"<td class='n'>{st['rows']}</td><td>{state}</td></tr>")
-    parts.append("</table>")
+            state += " <span class='tag muted'>parziale</span>"
+        o.append(f"<tr><td>{html.escape(st['filename'][:44])}</td>"
+                 f"<td>{st['period_start']} → {st['period_end']}</td>"
+                 f"<td class='n'>{st['rows']}</td><td>{state}</td></tr>")
+    o.append("</table>")
 
-    parts.append("<h2>Mesi</h2><table><tr><th></th>"
-                 + "".join(f"<th class='n'>{m}</th>" for m in months) + "</tr>")
-    for bucket, label in (("purchase", "Acquisti"), ("transfer", "Trasferimenti"),
-                          ("internal", "Interni"), ("income", "Entrate")):
-        parts.append(f"<tr><td>{label}</td>"
-                     + "".join(f"<td class='n'>{money(per_month[m].get(bucket, 0))}</td>"
-                               for m in months) + "</tr>")
-    parts.append("</table>")
-
-    parts.append("<h2>Acquisti per categoria</h2><table><tr><th>Categoria</th><th>Totale</th>"
-                 "<th>Mov.</th><th></th></tr>")
-    top_val = max((c["v"] for c in cats), default=1) or 1
+    o.append("<h2>Categorie</h2><table><tr><th>Categoria</th><th class='n'>Totale</th>"
+             "<th class='n'>Mov.</th><th class='n'>Quota</th></tr>")
     for c in cats:
-        width = int(100 * c["v"] / top_val)
         cls = " class='warn'" if c["category"] == "Da classificare" else ""
-        parts.append(f"<tr><td{cls}>{html.escape(c['category'])}</td>"
-                     f"<td class='n'>{money(c['v'])}</td><td class='n'>{c['n']}</td>"
-                     f"<td style='width:35%'><div class='bar' style='width:{width}%'></div></td></tr>")
-    parts.append("</table>")
+        share = 100 * c["v"] / s["purchases"] if s["purchases"] else 0
+        o.append(f"<tr><td{cls}>{html.escape(c['category'])}</td>"
+                 f"<td class='n'>{money(c['v'])}</td><td class='n'>{c['n']}</td>"
+                 f"<td class='n'>{share:.0f}%</td></tr>")
+    o.append("</table>")
 
-    parts.append(f"<h2>Da classificare ({len(pending)})</h2>")
-    if pending:
-        parts.append("<table><tr><th>Esercente</th><th>Mov.</th><th>Totale</th></tr>")
-        for p in pending[:40]:
-            parts.append(f"<tr><td>{html.escape(p['name'][:66])}</td><td class='n'>{p['n']}</td>"
-                         f"<td class='n'>{money(-p['spent'])}</td></tr>")
-        parts.append("</table>")
+    o.append(f"<h2>Altri flussi</h2><table><tr><th>Voce</th><th class='n'>Totale</th></tr>"
+             f"<tr><td>Trasferimenti a persone</td><td class='n'>{money(s['transfers'])}</td></tr>"
+             f"<tr><td>Movimenti interni (pocket, deposito)</td>"
+             f"<td class='n'>{money(s['internal'])}</td></tr>"
+             f"<tr><td>Rimborsi</td><td class='n'>{money(s['refunds'])}</td></tr>"
+             f"<tr><td>Righe non quadrate</td>"
+             f"<td class='n {'warn' if s['bad_rows'] else ''}'>{s['bad_rows']}</td></tr></table>")
 
-    parts.append("<h2>Top esercenti</h2><table><tr><th>Esercente</th><th>Mov.</th><th>Totale</th></tr>")
-    for t in top:
-        parts.append(f"<tr><td>{html.escape(t['name'][:66])}</td><td class='n'>{t['n']}</td>"
-                     f"<td class='n'>{money(-t['v'])}</td></tr>")
-    parts.append("</table>")
-
-    parts.append("<h2>Ultimi movimenti</h2><table><tr><th>Data</th><th>Esercente</th>"
-                 "<th>Categoria</th><th>Tipo</th><th>Importo</th></tr>")
-    for r in recent:
+    o.append("<h2>Dettaglio</h2><table><tr><th>Data</th><th>Esercente</th><th>Categoria</th>"
+             "<th>Tipo</th><th class='n'>Importo</th></tr>")
+    for r in detail:
         cls = " class='warn'" if r["category"] == "Da classificare" else ""
-        flag = "" if r["check_ok"] else " ⚠"
-        parts.append(f"<tr><td>{r['date']}{flag}</td><td>{html.escape(r['merchant_raw'][:52])}</td>"
-                     f"<td{cls}>{html.escape(r['category'])}</td><td>{r['bucket']}</td>"
-                     f"<td class='n'>{money(r['amount'])}</td></tr>")
-    parts.append("</table>")
-    parts.append(f"<footer>finance-ledger · {date.today().isoformat()} · locale, nessun cloud</footer>")
+        flag = "" if r["check_ok"] else " !"
+        o.append(f"<tr><td>{r['date']}{flag}</td><td>{html.escape(r['merchant_raw'][:52])}</td>"
+                 f"<td{cls}>{html.escape(r['category'])}</td><td class='muted'>{r['bucket']}</td>"
+                 f"<td class='n'>{money(r['amount'])}</td></tr>")
+    o.append("</table>")
+
+    o.append(f"<footer><span>finance-ledger · dati locali, nessun cloud</span>"
+             f"<span>{len(detail)} movimenti mostrati</span></footer>")
+
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("".join(parts), encoding="utf-8")
+    out.write_text("".join(o), encoding="utf-8")
     return {"dashboard": str(out), **{k: v for k, v in s.items() if k != "statements"}}
 
 
 # --------------------------------------------------------------------------- cli
+
 
 DEFAULT_DB = Path.home() / ".hermes" / "finance" / "finance.db"
 DEFAULT_OUT = Path.home() / ".hermes" / "finance" / "dashboard.html"
@@ -584,6 +706,13 @@ def main() -> None:
     pen = sub.add_parser("pending", help="merchants still to identify")
     pen.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    srv = sub.add_parser("serve", help="serve the dashboard on 127.0.0.1 (use an SSH tunnel)")
+    srv.add_argument("--port", type=int, default=8099)
+    srv.add_argument("--dir", type=Path, default=DEFAULT_OUT.parent)
+
+    rk = sub.add_parser("rekey", help="recompute merchant keys")
+    rk.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     cl = sub.add_parser("classify", help="set a merchant category")
     cl.add_argument("--db", type=Path, default=DEFAULT_DB)
     cl.add_argument("--key", required=True)
@@ -607,6 +736,14 @@ def main() -> None:
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence)
         print("ok")
+    elif a.cmd == "rekey":
+        print(f"rekey: {rekey(conn)} righe aggiornate")
+    elif a.cmd == "serve":
+        import functools
+        import http.server
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(a.dir))
+        print(f"http://127.0.0.1:{a.port}/dashboard.html  (ctrl-c per fermare)")
+        http.server.ThreadingHTTPServer(("127.0.0.1", a.port), handler).serve_forever()
 
 
 if __name__ == "__main__":

@@ -34,7 +34,8 @@ path. Run:
 finance-ledger ingest "<the path you were given>"
 ```
 
-Then reply with **one short message** built only from the JSON it prints:
+Then reply with **at most three short lines**, built only from the JSON it prints.
+No tables, no category list, no emoji: the dashboard carries the detail.
 
 - `status: imported` → period, rows, whether it is `partial`, whether it is
   `reconciled`, and the `spend` figure. If `partial` is true, say plainly that the
@@ -53,6 +54,20 @@ Always attach the dashboard after a successful import, as its own line:
 ```
 MEDIA:~/.hermes/finance/dashboard.html
 ```
+
+## Guardare i dati quando servono
+
+The dashboard is a file, not a service. To browse it on demand:
+
+```bash
+# on the laptop
+ssh -L 8099:127.0.0.1:8099 agent
+# on the VPS
+sudo -u hermes env HOME=/home/hermes finance-ledger serve
+# then open http://127.0.0.1:8099/dashboard.html
+```
+
+Never bind it to 0.0.0.0 and never expose the port.
 
 ## What the numbers mean
 
