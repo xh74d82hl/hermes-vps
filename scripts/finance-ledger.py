@@ -686,6 +686,29 @@ def search_web(query: str, limit: int = 5) -> list[dict]:
     return [{"error": first_error}]
 
 
+def enrich(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
+    """One payload for the model: each pending merchant with its evidence already fetched.
+
+    Without this the agent does one model call per merchant, which is what makes an
+    import turn take minutes. Here the searches happen in one process and the model
+    decides once.
+    """
+    rows = pending_merchants(conn)[:limit]
+    out = []
+    for row in rows:
+        evidence = search_web(f"{row['name']}", 3)
+        out.append({
+            "key": row["key"],
+            "name": row["name"],
+            "n": row["n"],
+            "spent": round(row["spent"], 2),
+            "evidence": [{"title": e.get("title", "")[:90],
+                          "snippet": e.get("snippet", "")[:180]}
+                         for e in evidence if not e.get("error")],
+        })
+    return out
+
+
 def rekey(conn: sqlite3.Connection) -> int:
     """Recompute merchant keys after a change to the normaliser."""
     rows = conn.execute("SELECT id, merchant_raw, merchant_key FROM txn").fetchall()
@@ -1000,6 +1023,10 @@ def main() -> None:
     cl.add_argument("--confidence", type=float, default=1.0)
     cl.add_argument("--by", default="manual")
 
+    en = sub.add_parser("enrich", help="pending merchants with search evidence, one payload")
+    en.add_argument("--db", type=Path, default=DEFAULT_DB)
+    en.add_argument("--limit", type=int, default=15)
+
     sr = sub.add_parser("search", help="web search (Tavily/Brave), for the agent to reason on")
     sr.add_argument("query")
     sr.add_argument("--limit", type=int, default=5)
@@ -1043,6 +1070,8 @@ def main() -> None:
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence, a.by, a.ateco, a.source)
         print("ok")
+    elif a.cmd == "enrich":
+        print(json.dumps(enrich(conn, a.limit), indent=2, ensure_ascii=False))
     elif a.cmd == "search":
         print(json.dumps(search_web(a.query, a.limit), indent=2, ensure_ascii=False))
     elif a.cmd == "literals":

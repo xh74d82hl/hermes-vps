@@ -86,7 +86,38 @@ Never bind it to 0.0.0.0 and never expose the port.
 A month with €7.000 "out" is normal: most of it is pocket round-trips. Never report
 the gross movement as spending.
 
-## Merchants: search, reason, classify
+## Merchants: search, reason, classify — but never inside the import turn
+
+**The import turn must stay short.** Answer the import in three lines and stop. Then
+hand the classification to a one-shot job, which runs in a fresh session and cannot
+hold the chat hostage:
+
+```bash
+hermes cron create "in 2m" "Classifica gli esercenti pendenti con finance-ledger enrich \
+e classify-batch, seguendo la skill finance. Chiedi solo cio che le evidenze non \
+coprono, poi finance-ledger report." \
+  --name finance-classify --skill finance --deliver telegram --repeat 1
+```
+
+Inside the job, work in **one payload, one decision**: `finance-ledger enrich --limit 15`
+runs the searches and returns every pending merchant with its evidence, so a single
+model call can classify them all:
+
+```bash
+finance-ledger enrich --limit 15
+echo '[{"key":"...","category":"Svago","confidence":0.9,"source":"ticketsms.it"}]' \
+  | finance-ledger classify-batch
+```
+
+Do not loop `search` per merchant: that is one model call each and it turns an import
+into minutes of waiting.
+
+Why: each merchant costs one model call plus one search, so classifying 25 of them
+inside the chat turn means minutes of "still working" and a context that grows past
+40k tokens. In a job it happens in parallel with your life, and its transcript is
+thrown away afterwards.
+
+Classify inline only when `pending` returns three merchants or fewer.
 
 After every import this is your job in the same turn. You have a search command, so
 there is no excuse to leave a name you could have looked up:
