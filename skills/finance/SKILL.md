@@ -124,6 +124,26 @@ Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
 Shopping, Abbonamenti, Viaggi, Svago, Regali, Tasse e burocrazia, Investimenti,
 Entrate, Rimborsi, Trasferimenti.
 
+## Quando l'utente dice qualcosa di durevole
+
+Due destinazioni diverse, e vanno scelte bene:
+
+| Cosa dice | Dove finisce | Comando |
+|---|---|---|
+| "quella è una ferramenta", "TicketSms è biglietti concerti" | fatto su un esercente, vale per sempre | `finance-ledger classify ...` |
+| "la Spesa solo per i supermercati", "non mostrarmi i pocket", "niente emoji" | preferenza di comportamento | tool `memory`, target `memory` |
+| "non mi fidare dei totali arrotondati" | preferenza | tool `memory`, target `user` |
+
+Regola: **una correzione su un esercente non è una preferenza**, e viceversa. Se sbagli
+destinazione, la correzione non torna mai piu.
+
+Dopo aver salvato una preferenza, conferma in una riga ("annotato: Spesa solo per i
+supermercati") e continua. La memoria entra nel prompt all'inizio di ogni sessione,
+quindi vale dalle sessioni successive (un job cron la vede subito, la chat aperta no).
+
+Se una preferenza contraddice una regola di questa skill, la preferenza vince: aggiorna
+il comportamento e dillo all'utente.
+
 ## Other commands
 
 ```bash
