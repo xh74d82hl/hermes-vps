@@ -149,22 +149,25 @@ Then:
    If the code contradicts the evidence (a real estate code for a 4,50 € charge), do
    not use it: it is a different company with the same name.
 4. **Spesa means supermarkets and food shops.** A generic shop is Shopping.
-5. **A name is not proof.** "Bar X" does not mean it is a bar: many Italian bars are
+5. **Processors are not shops.** `Paypal *paga in 3 rate`, Klarna, Scalapay, Soisy are
+   payment methods, not merchants: they go to **Pagamenti a rate**, which keeps them
+   visible as money spent without pretending you shopped at PayPal.
+6. **A name is not proof.** "Bar X" does not mean it is a bar: many Italian bars are
    also tabaccherie, and a tabaccheria that sells coffee stays a tabaccheria.
    - name with `tabaccheria`, `tabacchi`, `tobacco`, `smoking`, `sigarette` ->
      **Smoking**, and this wins over the bar rule.
    - ATECO `47.26` (tobacco retail) -> **Smoking**; `56.3` (bars) -> Bar e ristoranti.
      When both fit, the code decides.
    - no code and no evidence: leave it unclassified instead of calling it a bar.
-6. **Ask the user only when the evidence is absent or contradictory**, five at most,
+7. **Ask the user only when the evidence is absent or contradictory**, five at most,
    with movements and total, and mark them asked. Personal names behind card processors,
    generic terminals: those are theirs to answer.
-7. Never invent. `Da classificare` is an honest state; a wrong category poisons every
+8. Never invent. `Da classificare` is an honest state; a wrong category poisons every
    following month.
 
 Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
-Shopping, Abbonamenti, Viaggi, Svago, Smoking, Regali, Tasse e burocrazia,
-Investimenti, Entrate, Rimborsi, Trasferimenti.
+Shopping, Abbonamenti, Viaggi, Svago, Smoking, Pagamenti a rate, Regali,
+Tasse e burocrazia, Investimenti, Entrate, Rimborsi, Trasferimenti.
 
 ## Quando l'utente dice qualcosa di durevole
 

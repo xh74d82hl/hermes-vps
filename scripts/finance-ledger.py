@@ -37,8 +37,8 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 
 CATEGORIES = [
     "Spesa", "Bar e ristoranti", "Trasporti", "Casa e bollette", "Salute",
-    "Shopping", "Abbonamenti", "Viaggi", "Svago", "Smoking", "Regali",
-    "Tasse e burocrazia",
+    "Shopping", "Abbonamenti", "Viaggi", "Svago", "Smoking", "Pagamenti a rate",
+    "Regali", "Tasse e burocrazia",
     "Investimenti", "Entrate", "Rimborsi", "Trasferimenti", "Da classificare",
 ]
 
@@ -531,6 +531,7 @@ def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
 # Words that name the trade itself. "Ferramenta X" is a hardware store; asking the web
 # is theatre. Ordered: the first match wins, so put the specific ones first.
 LITERAL_RULES = [
+    (r"paga in \d+ rate|pagamento rateale|klarna|scalapay|soisy|affirm", "Pagamenti a rate"),
     (r"ferramenta|brico|fai da te", "Shopping"),
     (r"tabaccheria|tabacchi|tobacco|smoking|sigarette", "Smoking"),
     (r"farmacia|parafarmacia", "Salute"),
