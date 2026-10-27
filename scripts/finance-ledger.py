@@ -712,6 +712,28 @@ def enrich(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
     return out
 
 
+def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
+    """The growing map of merchants already decided, as a file you can read and correct.
+
+    This is a cache, not a skill: the database is what stops a second search, and the
+    export exists so a human can audit or fix it. Loading hundreds of names into the
+    prompt as a skill would cost tokens on every finance turn and duplicate this.
+    """
+    rows = [dict(r) for r in conn.execute(
+        "SELECT name, category, ateco, confidence, resolved_by, source FROM merchant"
+        " WHERE category <> 'Da classificare' ORDER BY category, name")]
+    if out:
+        lines = ["# Esercenti noti", "",
+                 f"{len(rows)} esercenti classificati. Generato da finance-ledger.", "",
+                 "| Esercente | Categoria | ATECO | Fonte |", "|---|---|---|---|"]
+        for r in rows:
+            lines.append(f"| {r['name'][:60]} | {r['category']} | {r['ateco'] or ''} | "
+                         f"{r['resolved_by']}{(' / ' + r['source'][:40]) if r['source'] else ''} |")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return rows
+
+
 def rekey(conn: sqlite3.Connection) -> int:
     """Recompute merchant keys after a change to the normaliser."""
     rows = conn.execute("SELECT id, merchant_raw, merchant_key FROM txn").fetchall()
@@ -1026,6 +1048,10 @@ def main() -> None:
     cl.add_argument("--confidence", type=float, default=1.0)
     cl.add_argument("--by", default="manual")
 
+    kn = sub.add_parser("known", help="export the merchants already classified")
+    kn.add_argument("--db", type=Path, default=DEFAULT_DB)
+    kn.add_argument("--out", type=Path, default=DEFAULT_DB.parent / "known-merchants.md")
+
     en = sub.add_parser("enrich", help="pending merchants with search evidence, one payload")
     en.add_argument("--db", type=Path, default=DEFAULT_DB)
     en.add_argument("--limit", type=int, default=15)
@@ -1073,6 +1099,9 @@ def main() -> None:
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence, a.by, a.ateco, a.source)
         print("ok")
+    elif a.cmd == "known":
+        rows = known(conn, a.out)
+        print(f"{len(rows)} esercenti noti -> {a.out}")
     elif a.cmd == "enrich":
         print(json.dumps(enrich(conn, a.limit), indent=2, ensure_ascii=False))
     elif a.cmd == "search":
