@@ -670,7 +670,7 @@ def ateco_lookup(name: str) -> dict:
 def search_web(query: str, limit: int = 5) -> list[dict]:
     """Generic web search for the agent. Tavily first, then Brave, then HTML.
 
-    This is what turns "what is TicketSms?" into one command instead of a browser.
+    This is what turns "what is this shop?" into one command instead of a browser.
     """
     key = _secret("TAVILY_API_KEY")
     if key:
