@@ -1,0 +1,8 @@
+[Unit]
+Description=Telegram alert for failed unit %i
+
+[Service]
+Type=oneshot
+# %i = the unit that failed, passed through OnFailure=hermes-alert@%n.service
+ExecStart=/usr/local/sbin/hermes-alert %i
+Nice=10

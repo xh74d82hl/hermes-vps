@@ -401,7 +401,56 @@ Repository URL examples:
 
 ---
 
-## 9. Final checklist
+## 9. Failure alerts (~5 min, optional)
+
+systemd can run a script when a unit fails, which is how you learn that a backup died without
+checking the box every morning. The sender is plain `curl` against the Telegram Bot API, not
+`hermes send`: when something is broken, the gateway may be part of what is broken.
+
+Use a **dedicated bot** so alerts land in their own chat, can be muted separately, and survive the
+main bot being reconfigured or revoked.
+
+1. Telegram → **@BotFather** → `/newbot`, username ending in `bot`. Copy the token, then **press
+   Start** in the new bot's chat (a bot cannot message you first).
+2. Install the units:
+
+   ```bash
+   sudo /opt/hermes-vps/scripts/install-alerts.sh
+   ```
+
+   It installs `/usr/local/sbin/hermes-alert`, the `hermes-alert@.service` template, and a drop-in
+   that makes `hermes-backup.service` call it on failure.
+
+3. Fill in the credentials — `0600 root:root`, never in this repo:
+
+   ```bash
+   sudo nano /etc/hermes-alert.env     # ALERT_BOT_TOKEN, ALERT_CHAT_ID (your numeric user id)
+   ```
+
+4. Test both paths. First the sender, then a unit that really fails:
+
+   ```bash
+   sudo hermes-alert hermes-backup.service
+   cat > /tmp/alert-test.service <<'EOF'
+   [Unit]
+   OnFailure=hermes-alert@%n.service
+   [Service]
+   ExecStart=/bin/false
+   EOF
+   sudo cp /tmp/alert-test.service /etc/systemd/system/ && sudo systemctl daemon-reload
+   sudo systemctl start alert-test.service; sleep 5
+   journalctl -u 'hermes-alert@*' -n 10 --no-pager
+   sudo rm /etc/systemd/system/alert-test.service && sudo systemctl daemon-reload
+   ```
+
+   Two messages should arrive in the new bot's chat. The second one proves the `OnFailure` hook, not
+   just the script.
+
+What this covers: a failed unit, with the last 8 journal lines, deduplicated to one message per
+unit per 5 minutes. What it does not cover: the VPS being dead, or the timer never firing — for
+that, have the backup ping an external heartbeat service on success and alert on silence.
+
+## 10. Final checklist
 
 ```bash
 sudo /opt/hermes-vps/scripts/doctor.sh
@@ -417,11 +466,12 @@ sudo /opt/hermes-vps/scripts/doctor.sh
 - [ ] `hermes cron list` shows `morning-brief`, next run 07:00, last run `ok`
 - [ ] `hermes pairing list` shows only you
 - [ ] `restic snapshots` shows a snapshot; test restore succeeded
+- [ ] a failing unit produces a Telegram alert (section 9)
 - [ ] `~/.hermes/.env`, `google_token.json`, `/etc/hermes-backup.env` are all `0600`
 
 ---
 
-## 10. Order of operations that avoids pain
+## 11. Order of operations that avoids pain
 
 1. Base OS + hardening **before** installing anything that runs as a service.
 2. Hermes + gateway **before** Telegram/Google/voice: every later step is "edit config, restart,

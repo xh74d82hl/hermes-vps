@@ -21,6 +21,7 @@ Ubuntu 22.04+; the scripts only use `apt`, `systemd` and user services.
 | Voice out | Microsoft Edge neural voices (free, no key) — available on demand and to scheduled jobs |
 | Schedule | A 07:00 daily brief (unread mail + today's calendar) delivered to Telegram |
 | Backups | Optional nightly encrypted [restic](https://restic.net) backup to Backblaze B2 or any S3-compatible bucket |
+| Alerts | Telegram message when a unit fails, via a dedicated bot (no gateway dependency) |
 
 ## What it costs
 
@@ -69,10 +70,12 @@ scripts/install-hermes.sh install Hermes for the unprivileged agent user
 scripts/install-tectonic.sh  optional LaTeX engine (CV/PDF generation)
 scripts/install-voice.sh  ffmpeg + edge-tts inside the gateway's Python
 scripts/setup-backup.sh   nightly restic backup to S3/B2 + systemd timer
+scripts/install-alerts.sh Telegram alerts when a unit fails (dedicated bot)
 scripts/doctor.sh         read-only health check of the whole box
 systemd/                  backup service + timer
 examples/                 config snippets, venv wrapper, morning-brief prompt
 backup.example.env        template for /etc/hermes-backup.env
+alert.example.env         template for /etc/hermes-alert.env (alert bot credentials)
 SETUP.md                  the step-by-step walkthrough
 TROUBLESHOOTING.md        gotchas, symptoms, fixes
 RESTORE.md                recovering the agent after the box dies
