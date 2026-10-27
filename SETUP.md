@@ -154,7 +154,8 @@ hermes send -t telegram:<CHAT_ID> "delivery test $(date '+%H:%M')"
 
 This uses **your own** OAuth client, so no third-party app ever holds your mail. Scopes we
 grant: `gmail.readonly`, `calendar.readonly`, `calendar.events` — read mail, read calendars,
-create/modify events. Nothing can send or delete mail.
+create/modify events. Nothing can send or delete mail. Tasks and notes are covered at the end of
+this section, if you want them.
 
 1. <https://console.cloud.google.com> → new project (e.g. `hermes-agent`).
 2. **APIs & Services → Library**: enable **Gmail API** and **Google Calendar API**.
@@ -188,6 +189,47 @@ rm /tmp/gs.json
    personal use; full verification (CASA review) is only needed to distribute it publicly.
 8. Enable the skill and try it in chat: *"what's on my calendar tomorrow"*, *"add lunch with
    Anna on Friday at 13:00"*, *"any unread mail from my bank?"*.
+
+### Tasks and notes (optional)
+
+Mail and calendar are enough for the daily brief. If you also want the agent to manage reminders
+and notes, add three scopes and switch on three APIs. Both steps are required: a scope lets the
+agent ask, the API lets Google answer.
+
+1. **Enable the APIs** — <https://console.cloud.google.com/apis/library>, press **Enable** on each:
+   - Google Tasks API
+   - Google Docs API
+   - Google Drive API
+
+2. **Add the scopes** to the list in step 3 above:
+
+   ```
+   https://www.googleapis.com/auth/tasks
+   https://www.googleapis.com/auth/documents
+   https://www.googleapis.com/auth/drive.file
+   ```
+
+3. **Authorize again** (steps 6–7). The consent screen re-asks for the permissions you already
+   granted; that is how Google refreshes the grant.
+
+4. **Use it**:
+
+   ```bash
+   $GAPI tasks lists                                     # your task lists
+   $GAPI tasks list                                      # open tasks
+   $GAPI tasks create --title "Call the accountant" --due 2026-11-02
+   $GAPI tasks complete TASK_ID
+   $GAPI docs create --title "Note: tax 2026" --body "first line"
+   $GAPI docs append DOC_ID --text "follow-up"
+   $GAPI drive search "name contains 'Note:'" --raw-query
+   ```
+
+The due date is `YYYY-MM-DD`; Tasks alerts on that date, so anything needing a specific hour
+belongs in a calendar event. Notes are ordinary Google Docs, titled `Note: ...` so a search finds
+them. Google Keep has no API for personal accounts and cannot be used.
+
+The `drive.file` scope only exposes files the agent created itself — the notes it writes, not your
+existing documents. Reading older Docs needs the wider `auth/drive` scope and another authorization.
 
 The two files that matter afterwards:
 

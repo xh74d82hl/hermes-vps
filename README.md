@@ -16,6 +16,7 @@ Ubuntu 22.04+; the scripts only use `apt`, `systemd` and user services.
 | Agent | Hermes installed for the agent user, gateway as a systemd **user** service, survives reboot |
 | Chat | Telegram bot, access controlled by pairing code (not an open bot) |
 | Mail / calendar | Gmail **read-only** + Calendar **read + create events**, via your own Google OAuth client |
+| Tasks / notes | Google Tasks (reminders with due dates) + notes as Google Docs, same client (optional) |
 | Voice in | Whisper on Groq (free tier, no card) — you send a voice note, it gets transcribed |
 | Voice out | Microsoft Edge neural voices (free, no key) — available on demand and to scheduled jobs |
 | Schedule | A 07:00 daily brief (unread mail + today's calendar) delivered to Telegram |
