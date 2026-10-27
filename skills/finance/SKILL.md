@@ -82,20 +82,33 @@ Never bind it to 0.0.0.0 and never expose the port.
 A month with €7.000 "out" is normal: most of it is pocket round-trips. Never report
 the gross movement as spending.
 
-## Merchants
+## Merchants: you do the research, not the user
 
-`finance-ledger pending` lists the merchants still without a category, most
-expensive first. For each one:
+After every import, run `finance-ledger pending`. That list is your job, in the same
+turn, not "next time":
 
-1. If the name is recognisable or findable on the web (a shop, a chain, a utility),
-   decide the category and save it:
-   `finance-ledger classify --key "<key>" --name "<name>" --category "Spesa"`
-2. If it is not findable (card-processor names like `Sumup *lin Liangzhu`, personal
-   names, card-present terminals), **ask the user once** — show the name, the
-   number of movements and the total, and offer the likely categories. When they
-   answer, classify it and say it will not be asked again.
-3. Never guess a category you cannot justify; `Da classificare` is a valid resting
-   state.
+1. **Research first.** For each merchant, use web search. Two or three queries are
+   enough: the name plus the city, then the name alone. Chains, utilities, fuel
+   stations, pharmacies, supermarkets, transport and delivery are usually obvious
+   from the name alone, no search needed.
+2. **Classify what you can justify**, one call per batch:
+   ```bash
+   echo '[{"key":"esselunga milano","name":"Esselunga","category":"Spesa","confidence":0.9}]' \
+     | finance-ledger classify-batch
+   ```
+   Confidence: 0.9 when the search confirms it, 0.6 when the name is unambiguous but
+   unverified, and never above 0.5 for a guess you would not defend.
+3. **Ask only the unanswerable ones** in a single message: card-processor names like
+   `Sumup *lin Liangzhu`, personal names, `Pos1`, generic terminals. Six at most per
+   message, each with how many movements and the total, and offer two or three
+   plausible categories. Then mark them asked:
+   ```bash
+   finance-ledger mark-asked "key one" "key two"
+   ```
+   When the user answers, classify those keys and confirm in one line that they will
+   not be asked again.
+4. **Never invent a category you cannot justify.** Leaving a merchant in
+   `Da classificare` is honest; a wrong category corrupts every future month.
 
 Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
 Shopping, Abbonamenti, Viaggi, Svago, Regali, Tasse e burocrazia, Investimenti,

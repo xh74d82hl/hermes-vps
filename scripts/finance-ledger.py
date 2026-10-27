@@ -268,6 +268,10 @@ def connect(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(merchant)")}
+    if "asked_at" not in cols:
+        conn.execute("ALTER TABLE merchant ADD COLUMN asked_at TEXT")
+        conn.commit()
     return conn
 
 
@@ -393,12 +397,31 @@ def contract_category(bucket: str) -> str:
 # --------------------------------------------------------------------------- queries
 
 
-def pending_merchants(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def pending_merchants(conn: sqlite3.Connection, include_asked: bool = False) -> list[sqlite3.Row]:
+    recent = "" if include_asked else (
+        " AND (m.asked_at IS NULL OR m.asked_at < date('now','-30 day'))")
     return conn.execute(
-        "SELECT m.key, m.name, COUNT(*) n, SUM(-t.amount) spent"
+        "SELECT m.key, m.name, m.asked_at, COUNT(*) n, SUM(-t.amount) spent"
         " FROM txn t JOIN merchant m ON m.key = t.merchant_key"
-        " WHERE t.bucket='purchase' AND t.category='Da classificare'"
+        " WHERE t.bucket='purchase' AND t.category='Da classificare'" + recent +
         " GROUP BY m.key ORDER BY spent DESC").fetchall()
+
+
+def mark_asked(conn: sqlite3.Connection, keys: list[str]) -> int:
+    n = 0
+    for key in keys:
+        cur = conn.execute("UPDATE merchant SET asked_at=? WHERE key=?",
+                           (date.today().isoformat(), key))
+        n += cur.rowcount
+    conn.commit()
+    return n
+
+
+def classify_batch(conn: sqlite3.Connection, rows: list[dict]) -> int:
+    for row in rows:
+        classify(conn, row["key"], row.get("name") or row["key"], row["category"],
+                 float(row.get("confidence", 0.8)), row.get("by", "agent"))
+    return len(rows)
 
 
 def classify(conn: sqlite3.Connection, key: str, name: str, category: str,
@@ -557,12 +580,9 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
     cats = conn.execute(
         "SELECT category, SUM(-amount) v, COUNT(*) n FROM txn WHERE bucket='purchase'"
         " GROUP BY category ORDER BY v DESC").fetchall()
-    palette = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"]
-    top_cats, rest = cats[:5], sum(c["v"] for c in cats[5:])
-    if rest > 0:
-        top_cats = list(top_cats) + [{"category": "Altre", "v": rest, "n": 0}]
-    segments = [(c["category"], c["v"], "#" + col) for c, col in
-                zip(top_cats, ["3a5f8f", "4f8a8b", "a8863f", "a05a4a", "7c6a9c", "b9b7ae"])]
+    # one list drives donut, legend and table: same rows, same colours, same numbers
+    segments = [(c["category"], c["v"], f"hsl({(205 + i * 53) % 360} 32% 45%)")
+                for i, c in enumerate(cats)]
 
     merchants = conn.execute(
         "SELECT m.name, COUNT(*) n, SUM(-t.amount) v FROM txn t"
@@ -580,7 +600,7 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
 
     detail = conn.execute(
         "SELECT date, merchant_raw, category, bucket, amount, check_ok FROM txn"
-        " ORDER BY date DESC LIMIT 80").fetchall()
+        " WHERE bucket <> 'internal' ORDER BY date DESC LIMIT 80").fetchall()
 
     o = [f"<!doctype html><meta charset='utf-8'>"
          f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -607,9 +627,9 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
     o.append(donut(segments, s["purchases"], money(s["purchases"]))
              if segments else "<div class='empty'>nessun acquisto importato</div>")
     o.append("<ul class='legend'>")
-    for (label, value, colour), cat in zip(segments, top_cats):
+    for label, value, colour in segments:
         share = 100 * value / s["purchases"] if s["purchases"] else 0
-        o.append(f"<li><span class='dot' style='background:#{colour}'></span>"
+        o.append(f"<li><span class='dot' style='background:{colour}'></span>"
                  f"<span class='name'>{html.escape(label)}</span>"
                  f"<span class='v'>{money(value)} · {share:.0f}%</span></li>")
     o.append("</ul></div>")
@@ -644,20 +664,20 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
                  f"<td class='n'>{st['rows']}</td><td>{state}</td></tr>")
     o.append("</table>")
 
-    o.append("<h2>Categorie</h2><table><tr><th>Categoria</th><th class='n'>Totale</th>"
-             "<th class='n'>Mov.</th><th class='n'>Quota</th></tr>")
-    for c in cats:
-        cls = " class='warn'" if c["category"] == "Da classificare" else ""
-        share = 100 * c["v"] / s["purchases"] if s["purchases"] else 0
-        o.append(f"<tr><td{cls}>{html.escape(c['category'])}</td>"
-                 f"<td class='n'>{money(c['v'])}</td><td class='n'>{c['n']}</td>"
+    o.append("<h2>Categorie (le stesse della torta)</h2><table><tr><th></th><th>Categoria</th>"
+             "<th class='n'>Totale</th><th class='n'>Mov.</th><th class='n'>Quota</th></tr>")
+    for (label, value, colour), c in zip(segments, cats):
+        cls = " class='warn'" if label == "Da classificare" else ""
+        share = 100 * value / s["purchases"] if s["purchases"] else 0
+        o.append(f"<tr><td style='width:14px'><span class='dot' style='background:{colour};"
+                 f"display:inline-block'></span></td>"
+                 f"<td{cls}>{html.escape(label)}</td>"
+                 f"<td class='n'>{money(value)}</td><td class='n'>{c['n']}</td>"
                  f"<td class='n'>{share:.0f}%</td></tr>")
     o.append("</table>")
 
     o.append(f"<h2>Altri flussi</h2><table><tr><th>Voce</th><th class='n'>Totale</th></tr>"
              f"<tr><td>Trasferimenti a persone</td><td class='n'>{money(s['transfers'])}</td></tr>"
-             f"<tr><td>Movimenti interni (pocket, deposito)</td>"
-             f"<td class='n'>{money(s['internal'])}</td></tr>"
              f"<tr><td>Rimborsi</td><td class='n'>{money(s['refunds'])}</td></tr>"
              f"<tr><td>Righe non quadrate</td>"
              f"<td class='n {'warn' if s['bad_rows'] else ''}'>{s['bad_rows']}</td></tr></table>")
@@ -705,10 +725,18 @@ def main() -> None:
 
     pen = sub.add_parser("pending", help="merchants still to identify")
     pen.add_argument("--db", type=Path, default=DEFAULT_DB)
+    pen.add_argument("--all", action="store_true", help="include recently asked")
 
     srv = sub.add_parser("serve", help="serve the dashboard on 127.0.0.1 (use an SSH tunnel)")
     srv.add_argument("--port", type=int, default=8099)
     srv.add_argument("--dir", type=Path, default=DEFAULT_OUT.parent)
+
+    cb = sub.add_parser("classify-batch", help="classify many merchants from JSON on stdin")
+    cb.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    ma = sub.add_parser("mark-asked", help="remember that these merchants were asked about")
+    ma.add_argument("--db", type=Path, default=DEFAULT_DB)
+    ma.add_argument("keys", nargs="+")
 
     rk = sub.add_parser("rekey", help="recompute merchant keys")
     rk.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -732,7 +760,14 @@ def main() -> None:
     elif a.cmd == "list":
         print(json.dumps(summary(conn)["statements"], indent=2, ensure_ascii=False))
     elif a.cmd == "pending":
-        print(json.dumps([dict(r) for r in pending_merchants(conn)], indent=2, ensure_ascii=False))
+        rows = [dict(r) for r in pending_merchants(conn, a.all)]
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+    elif a.cmd == "classify-batch":
+        import sys as _sys
+        payload = json.load(_sys.stdin)
+        print(f"classificati: {classify_batch(conn, payload)}")
+    elif a.cmd == "mark-asked":
+        print(f"segnati come chiesti: {mark_asked(conn, a.keys)}")
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence)
         print("ok")
