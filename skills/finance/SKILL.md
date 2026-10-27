@@ -82,33 +82,32 @@ Never bind it to 0.0.0.0 and never expose the port.
 A month with €7.000 "out" is normal: most of it is pocket round-trips. Never report
 the gross movement as spending.
 
-## Merchants: you do the research, not the user
+## Merchants: search the legal name, trust the ATECO code
 
-After every import, run `finance-ledger pending`. That list is your job, in the same
-turn, not "next time":
+After every import, this is your job in the same turn:
 
-1. **Research first.** For each merchant, use web search. Two or three queries are
-   enough: the name plus the city, then the name alone. Chains, utilities, fuel
-   stations, pharmacies, supermarkets, transport and delivery are usually obvious
-   from the name alone, no search needed.
-2. **Classify what you can justify**, one call per batch:
+1. `finance-ledger pending` gives the list, biggest spend first.
+2. **A name with a legal form is a registered company, and companies publish an ATECO
+   code.** S.r.l., S.r.l.s., S.p.A., S.a.s., S.n.c., "Ditta Individuale", Srl, Spa: for
+   those, search the web for the legal name, not the trade name:
+   - `<name> codice ateco`
+   - `<name> partita iva`
+   - useful sources: ufficiocamerale.it, reportaziende.it, ateco.infocamere.it, registroimprese
+3. Save the code, never a category you chose yourself:
    ```bash
-   echo '[{"key":"esselunga milano","name":"Esselunga","category":"Spesa","confidence":0.9}]' \
-     | finance-ledger classify-batch
+   finance-ledger classify --key "fabbrica v 184 s r l" --ateco 56.10 --source "<url>"
    ```
-   Confidence: 0.9 when the search confirms it, 0.6 when the name is unambiguous but
-   unverified, and never above 0.5 for a guess you would not defend.
-3. **Ask only the unanswerable ones** in a single message: card-processor names like
-   `Sumup *lin Liangzhu`, personal names, `Pos1`, generic terminals. Six at most per
-   message, each with how many movements and the total, and offer two or three
-   plausible categories. Then mark them asked:
-   ```bash
-   finance-ledger mark-asked "key one" "key two"
-   ```
-   When the user answers, classify those keys and confirm in one line that they will
-   not be asked again.
-4. **Never invent a category you cannot justify.** Leaving a merchant in
-   `Da classificare` is honest; a wrong category corrupts every future month.
+   The script maps ATECO to category and **refuses codes it does not know**, so an
+   unmapped code stays unclassified instead of becoming a wrong guess.
+4. **Spesa means supermarkets and food shops only** (47.11, 47.2x). A generic shop, a
+   clothing store, a hardware store: those are Shopping, not Spesa.
+5. **Bars and restaurants are 56.x.** A name that merely looks like a bar, with no code
+   and no confirmation, is not enough: leave it unclassified.
+6. No legal form and nothing found on the web: leave it in `Da classificare`. Ask the
+   user only for the biggest amounts (5 at most, with movements and total), and mark
+   them asked. Never invent, never guess to fill the table.
+7. If you already assigned a category without a code and it turns out wrong:
+   `finance-ledger unclassify --key "<key>"`.
 
 Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
 Shopping, Abbonamenti, Viaggi, Svago, Regali, Tasse e burocrazia, Investimenti,

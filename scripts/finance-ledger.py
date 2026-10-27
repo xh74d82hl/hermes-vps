@@ -24,6 +24,7 @@ import argparse
 import hashlib
 import html
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -31,6 +32,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
+
+HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 
 CATEGORIES = [
     "Spesa", "Bar e ristoranti", "Trasporti", "Casa e bollette", "Salute",
@@ -70,6 +73,48 @@ IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,}\b")
 NOISE_RE = re.compile(
     r"segnala carta|scansiona|revolut bank|pagina \d|assistenza|depositi sono protetti|"
     r"otteni assistenza|sito web|partiva iva|registrazione|\+370", re.I)
+
+# ATECO 2007 -> category. Only unambiguous codes are mapped: a wrong category is worse
+# than an unclassified merchant, because it silently poisons every later month.
+ATECO_MAP = [
+    ("47.11", "Spesa"),            # supermercati, minimarket, discount
+    ("47.2", "Spesa"),             # alimentari specializzati (frutta, carne, pane)
+    ("47.73", "Salute"), ("47.74", "Salute"), ("47.75", "Salute"),
+    ("47.7", "Shopping"), ("47.5", "Shopping"), ("47.4", "Shopping"),
+    ("47.6", "Shopping"), ("47.8", "Shopping"), ("47.9", "Shopping"),
+    ("47.3", "Shopping"), ("47.1", "Shopping"), ("47.", "Shopping"),
+    ("56.", "Bar e ristoranti"),   # ristorazione, bar
+    ("55.", "Viaggi"),             # alloggio
+    ("49.", "Trasporti"), ("50.", "Trasporti"), ("51.", "Trasporti"),
+    ("52.", "Trasporti"), ("53.", "Trasporti"), ("45.", "Trasporti"),
+    ("35.", "Casa e bollette"), ("36.", "Casa e bollette"), ("38.", "Casa e bollette"),
+    ("68.", "Casa e bollette"), ("41.", "Casa e bollette"), ("43.", "Casa e bollette"),
+    ("46.", "Shopping"),           # commercio all'ingrosso
+    ("86.", "Salute"), ("87.", "Salute"), ("88.", "Salute"),
+    ("90.", "Svago"), ("91.", "Svago"), ("92.", "Svago"), ("93.", "Svago"),
+    ("96.", "Svago"),              # servizi alla persona
+    ("62.", "Abbonamenti"), ("63.", "Abbonamenti"), ("58.", "Abbonamenti"),
+    ("59.", "Abbonamenti"), ("60.", "Abbonamenti"), ("61.", "Abbonamenti"),
+    ("73.", "Abbonamenti"), ("74.", "Abbonamenti"), ("85.", "Abbonamenti"),
+    ("64.", "Investimenti"), ("65.", "Investimenti"), ("66.", "Investimenti"),
+    ("84.", "Tasse e burocrazia"),
+]
+
+
+def category_from_ateco(code: str) -> str:
+    """Return the category for an ATECO code, or '' when the code is not mapped.
+
+    Accepts '47.11', '47.11.00', 'G/47.11', '47.1'. An unmapped code returns empty
+    so the caller leaves the merchant unclassified instead of guessing.
+    """
+    clean = re.sub(r"[^0-9.]", "", (code or "").strip())
+    if not clean:
+        return ""
+    for prefix, category in ATECO_MAP:
+        if clean.startswith(prefix):
+            return category
+    return ""
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS statement (
@@ -269,9 +314,10 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(merchant)")}
-    if "asked_at" not in cols:
-        conn.execute("ALTER TABLE merchant ADD COLUMN asked_at TEXT")
-        conn.commit()
+    for column in ("asked_at", "ateco", "source"):
+        if column not in cols:
+            conn.execute(f"ALTER TABLE merchant ADD COLUMN {column} TEXT")
+    conn.commit()
     return conn
 
 
@@ -419,23 +465,166 @@ def mark_asked(conn: sqlite3.Connection, keys: list[str]) -> int:
 
 def classify_batch(conn: sqlite3.Connection, rows: list[dict]) -> int:
     for row in rows:
-        classify(conn, row["key"], row.get("name") or row["key"], row["category"],
-                 float(row.get("confidence", 0.8)), row.get("by", "agent"))
+        classify(conn, row["key"], row.get("name") or row["key"],
+                 row.get("category", ""), float(row.get("confidence", 0.8)),
+                 row.get("by", "agent"), row.get("ateco", ""), row.get("source", ""))
     return len(rows)
 
 
 def classify(conn: sqlite3.Connection, key: str, name: str, category: str,
-             confidence: float = 1.0, by: str = "manual") -> None:
+             confidence: float = 1.0, by: str = "manual", ateco: str = "",
+             source: str = "") -> None:
+    if ateco and not category:
+        category = category_from_ateco(ateco)
+        if not category:
+            raise SystemExit(f"ATECO {ateco} non mappato: lascia l'esercente da classificare")
     if category not in CATEGORIES:
         raise SystemExit(f"categoria sconosciuta: {category}\nvalide: {', '.join(CATEGORIES)}")
     conn.execute(
-        "INSERT INTO merchant (key, name, category, confidence, resolved_by, resolved_at)"
-        " VALUES (?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET name=excluded.name,"
-        " category=excluded.category, confidence=excluded.confidence,"
-        " resolved_by=excluded.resolved_by, resolved_at=excluded.resolved_at",
-        (key, name, category, confidence, by, date.today().isoformat()))
+        "INSERT INTO merchant (key, name, category, confidence, resolved_by, resolved_at,"
+        " ateco, source) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET"
+        " name=excluded.name, category=excluded.category, confidence=excluded.confidence,"
+        " resolved_by=excluded.resolved_by, resolved_at=excluded.resolved_at,"
+        " ateco=COALESCE(NULLIF(excluded.ateco,''), merchant.ateco),"
+        " source=COALESCE(NULLIF(excluded.source,''), merchant.source)",
+        (key, name, category, confidence, by, date.today().isoformat(), ateco, source))
     conn.execute("UPDATE txn SET category=? WHERE merchant_key=?", (category, key))
     conn.commit()
+
+
+def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
+    """Undo a classification so it will be researched again."""
+    if key:
+        cur = conn.execute("UPDATE merchant SET category='Da classificare', confidence=0,"
+                           " resolved_by='', ateco=NULL, asked_at=NULL WHERE key=?", (key,))
+    else:
+        cur = conn.execute("UPDATE merchant SET category='Da classificare', confidence=0,"
+                           " resolved_by='', asked_at=NULL WHERE resolved_by=?", (by,))
+    conn.execute("UPDATE txn SET category='Da classificare' WHERE merchant_key IN"
+                 " (SELECT key FROM merchant WHERE category='Da classificare')")
+    conn.commit()
+    return cur.rowcount
+
+
+# Words that name the trade itself. "Ferramenta X" is a hardware store; asking the web
+# is theatre. Ordered: the first match wins, so put the specific ones first.
+LITERAL_RULES = [
+    (r"ferramenta|brico|fai da te", "Shopping"),
+    (r"tabaccheria|tabacchi|smoking", "Svago"),
+    (r"farmacia|parafarmacia", "Salute"),
+    (r"panificio|forno|pasticceria|gelateria|gelato", "Bar e ristoranti"),
+    (r"macelleria|pescheria|enoteca|alimentari|gastronomia|salumeria", "Spesa"),
+    (r"minimarket|supermercato|supermercati|discount|ipermercato|market", "Spesa"),
+    (r"bar\b|caffe|caffè|pizzeria|ristorante|trattoria|osteria|pub\b|bistrot|hamburger", "Bar e ristoranti"),
+    (r"edicola|libreria|cartoleria", "Shopping"),
+    (r"profumeria|gioielleria|ottica", "Shopping"),
+    (r"lavanderia|parrucchier|barbier", "Svago"),
+    (r"autofficina|gommista|carrozzeria|autolavaggio", "Trasporti"),
+    (r"benzina|carburanti|distributore", "Trasporti"),
+    (r"hotel|albergo|b&b|affittacamere|agriturismo", "Viaggi"),
+]
+
+
+def literal_category(name: str) -> str:
+    low = (name or "").lower()
+    for pattern, category in LITERAL_RULES:
+        if re.search(pattern, low):
+            return category
+    return ""
+
+
+def ateco_lookup(name: str) -> dict:
+    """Search the web for a company's ATECO code without a browser.
+
+    DuckDuckGo's HTML endpoint is enough for "name + codice ateco"; the snippets from
+    ufficiocamerale / reportaziende / registroaziende usually contain the code.
+    Returns candidates already mapped to a category, so the agent never picks one.
+    """
+    import urllib.parse
+    import urllib.request
+
+    query = f"{name} codice ateco"
+
+    # A free search API is the only reliable option from a datacenter IP: the HTML
+    # endpoints of Brave/DDG rate-limit or return a bot page. Key lives in ~/.hermes/.env.
+    key = os.environ.get("BRAVE_API_KEY", "")
+    if not key:
+        env_file = HERMES_HOME / ".env"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+                if line.startswith("BRAVE_API_KEY="):
+                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
+    if key:
+        api = ("https://api.search.brave.com/res/v1/web/search?count=5&q="
+               + urllib.parse.quote_plus(query))
+        try:
+            payload = urllib.request.urlopen(urllib.request.Request(
+                api, headers={"Accept": "application/json",
+                              "X-Subscription-Token": key}), timeout=20).read()
+            data = json.loads(payload)
+            text = " ".join(
+                f"{r.get('title','')} {r.get('description','')} {r.get('url','')}"
+                for r in (data.get("web", {}) or {}).get("results", []))
+            found: dict[str, str] = {}
+            for m in re.finditer(r"[Aa]teco\s*:?\s*(\d{2}(?:[.\s]\d{1,2}){0,2}|\d{6})", text):
+                code = m.group(1).replace(" ", "")
+                if len(code) == 6 and "." not in code:
+                    code = f"{code[:2]}.{code[2:4]}.{code[4:]}"
+                found.setdefault(code, category_from_ateco(code))
+            snippets = [text[max(0, m.start() - 90): m.end() + 110]
+                        for m in list(re.finditer(r"[Aa]teco", text))[:3]]
+            return {"name": name, "query": query, "engine": "brave-api",
+                    "codes": found, "snippets": snippets}
+        except Exception as exc:
+            pass  # fall through to the HTML engines
+
+    engines = [
+        ("brave", "https://search.brave.com/search?q=" + urllib.parse.quote_plus(query)),
+        ("ddg", "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote_plus(query)),
+    ]
+    text, used, errors = "", "", []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.6",
+    }
+    import time
+
+    for attempt in range(2):          # free HTML endpoints rate-limit; one retry is cheap
+        for label, url in engines:
+            try:
+                raw = urllib.request.urlopen(
+                    urllib.request.Request(url, headers=headers), timeout=20
+                ).read().decode("utf-8", "replace")
+            except Exception as exc:
+                errors.append(f"{label}: {str(exc)[:60]}")
+                time.sleep(4)
+                continue
+            candidate = re.sub(r"<[^>]+>", " ", raw)
+            candidate = re.sub(r"\s+", " ", html.unescape(candidate))
+            if "ateco" in candidate.lower() and len(candidate) > 2000:
+                text, used = candidate, label
+                break
+            errors.append(f"{label}: nessun risultato utile")
+            time.sleep(3)
+        if text:
+            break
+        time.sleep(6)
+    if not text:
+        return {"name": name, "query": query, "codes": {}, "error": "; ".join(errors[:3])}
+    found: dict[str, str] = {}
+    for m in re.finditer(r"[Aa]teco\s*:?\s*(\d{2}(?:[.\s]\d{1,2}){0,2}|\d{6})", text):
+        code = m.group(1).replace(" ", "")
+        if len(code) == 6 and "." not in code:
+            code = f"{code[:2]}.{code[2:4]}.{code[4:]}"
+        found.setdefault(code, category_from_ateco(code))
+    # "Ateco: 471102" also yields the bare "47"; keep the specific codes only
+    if any("." in c or len(c) == 6 for c in found):
+        found = {c: v for c, v in found.items() if "." in c or len(c) == 6}
+    snippets = [text[max(0, m.start() - 90): m.end() + 110]
+                for m in list(re.finditer(r"[Aa]teco", text))[:3]]
+    return {"name": name, "query": query, "engine": used, "codes": found,
+            "snippets": snippets}
 
 
 def rekey(conn: sqlite3.Connection) -> int:
@@ -725,7 +914,8 @@ def main() -> None:
 
     pen = sub.add_parser("pending", help="merchants still to identify")
     pen.add_argument("--db", type=Path, default=DEFAULT_DB)
-    pen.add_argument("--all", action="store_true", help="include recently asked")
+    pen.add_argument("--new", action="store_true",
+                     help="only merchants not asked in the last 30 days")
 
     srv = sub.add_parser("serve", help="serve the dashboard on 127.0.0.1 (use an SSH tunnel)")
     srv.add_argument("--port", type=int, default=8099)
@@ -745,10 +935,27 @@ def main() -> None:
     cl.add_argument("--db", type=Path, default=DEFAULT_DB)
     cl.add_argument("--key", required=True)
     cl.add_argument("--name", default="")
-    cl.add_argument("--category", required=True)
+    cl.add_argument("--category", default="", help="omit when --ateco is given")
+    cl.add_argument("--ateco", default="", help="ATECO code, e.g. 47.11")
+    cl.add_argument("--source", default="", help="where the code came from (url)")
     cl.add_argument("--confidence", type=float, default=1.0)
+    cl.add_argument("--by", default="manual")
+
+    lit = sub.add_parser("literals", help="classify merchants whose trade is in the name")
+    lit.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    at = sub.add_parser("ateco", help="look up a company's ATECO code on the web")
+    at.add_argument("--name", required=True)
+
+    uc = sub.add_parser("unclassify", help="undo a classification so it gets researched again")
+    uc.add_argument("--db", type=Path, default=DEFAULT_DB)
+    uc.add_argument("--key", default="")
+    uc.add_argument("--by", default="")
 
     a = p.parse_args()
+    if a.cmd == "ateco":          # no database needed
+        print(json.dumps(ateco_lookup(a.name), indent=2, ensure_ascii=False))
+        return
     conn = connect(a.db)
 
     if a.cmd == "ingest":
@@ -760,7 +967,7 @@ def main() -> None:
     elif a.cmd == "list":
         print(json.dumps(summary(conn)["statements"], indent=2, ensure_ascii=False))
     elif a.cmd == "pending":
-        rows = [dict(r) for r in pending_merchants(conn, a.all)]
+        rows = [dict(r) for r in pending_merchants(conn, include_asked=not a.new)]
         print(json.dumps(rows, indent=2, ensure_ascii=False))
     elif a.cmd == "classify-batch":
         import sys as _sys
@@ -769,8 +976,20 @@ def main() -> None:
     elif a.cmd == "mark-asked":
         print(f"segnati come chiesti: {mark_asked(conn, a.keys)}")
     elif a.cmd == "classify":
-        classify(conn, a.key, a.name or a.key, a.category, a.confidence)
+        classify(conn, a.key, a.name or a.key, a.category, a.confidence, a.by, a.ateco, a.source)
         print("ok")
+    elif a.cmd == "literals":
+        done = []
+        for row in pending_merchants(conn, include_asked=True):
+            cat = literal_category(row["name"])
+            if cat:
+                classify(conn, row["key"], row["name"], cat, 0.9, "literal")
+                done.append(f"{row['name'][:40]} -> {cat}")
+        print("\n".join(done) or "nessun nome auto-evidente")
+    elif a.cmd == "ateco":
+        print(json.dumps(ateco_lookup(a.name), indent=2, ensure_ascii=False))
+    elif a.cmd == "unclassify":
+        print(f"riportati da classificare: {unclassify(conn, a.by, a.key)}")
     elif a.cmd == "rekey":
         print(f"rekey: {rekey(conn)} righe aggiornate")
     elif a.cmd == "serve":
