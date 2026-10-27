@@ -123,7 +123,7 @@ After every import this is your job in the same turn. You have a search command,
 there is no excuse to leave a name you could have looked up:
 
 ```bash
-finance-ledger search "TicketSms" --limit 3      # Tavily, no browser
+finance-ledger search "<nome esercente>" --limit 3   # Tavily, no browser
 ```
 
 It returns title, url and snippet. Two searches are almost always enough: the name
@@ -131,9 +131,9 @@ alone, then the name plus the city.
 
 Then:
 
-1. **Reason from the evidence**, not from a code alone. `TicketSms` is a site that
-   sells concert and club tickets: Svago. `Mobbi` is a power bank rental: it does not
-   fit any category cleanly, so leave it.
+1. **Reason from the evidence**, not from a code alone. A site that sells concert and
+   club tickets is Svago; a power bank rental does not fit any category cleanly, so
+   leave it unclassified.
 2. **Use the exact `key` printed by `pending`** when classifying. Never build the key
    yourself, or the classification lands on nothing:
    ```bash
@@ -143,7 +143,7 @@ Then:
 3. **Companies with a legal form**: prefer the ATECO code when one is found, because
    it is objective:
    ```bash
-   finance-ledger ateco --name "Mo Sarpi Srl Milano"     # -> 56.11.12 -> Bar e ristoranti
+   finance-ledger ateco --name "Trattoria Da Mario Srl Milano"   # -> 56.11.12 -> Bar e ristoranti
    finance-ledger classify --key "..." --ateco 56.11.12 --source "<url>"
    ```
    If the code contradicts the evidence (a real estate code for a 4,50 € charge), do
@@ -157,7 +157,7 @@ Then:
      When both fit, the code decides.
    - no code and no evidence: leave it unclassified instead of calling it a bar.
 6. **Ask the user only when the evidence is absent or contradictory**, five at most,
-   with movements and total, and mark them asked. Personal names behind Sumup, `Pos1`,
+   with movements and total, and mark them asked. Personal names behind card processors,
    generic terminals: those are theirs to answer.
 7. Never invent. `Da classificare` is an honest state; a wrong category poisons every
    following month.
@@ -172,7 +172,7 @@ Due destinazioni diverse, e vanno scelte bene:
 
 | Cosa dice | Dove finisce | Comando |
 |---|---|---|
-| "quella è una ferramenta", "TicketSms è biglietti concerti" | fatto su un esercente, vale per sempre | `finance-ledger classify ...` |
+| "quella è una ferramenta", "quel sito vende biglietti" | fatto su un esercente, vale per sempre | `finance-ledger classify ...` |
 | "la Spesa solo per i supermercati", "non mostrarmi i pocket" | regola di questo dominio | aggiungi una riga a `~/.hermes/finance/preferences.md` |
 | "rispondi sempre in italiano", "niente emoji" | preferenza trasversale | tool `memory` |
 

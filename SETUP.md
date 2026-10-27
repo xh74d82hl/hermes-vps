@@ -459,7 +459,55 @@ hermes cron list                # the job is named remind:r-xxxx
 What it does not do: recurring reminders (`hermes cron create "every monday 9am"` instead), and
 phone calls — a Telegram bot can only send a message or a voice note.
 
-## 10. Failure alerts (~5 min, optional)
+## 10. Statements (optional)
+
+Send a bank statement PDF to the bot and get a reconciled ledger plus a dashboard. The
+import is idempotent (same file twice changes nothing) and refuses to lie: every amount
+is taken from the running **saldo** chain, not from a guess about columns, and a
+statement that does not add up is stored as unreconciled instead of producing
+confident wrong totals.
+
+```bash
+sudo apt-get install -y poppler-utils      # pdftotext
+sudo /opt/hermes-vps/scripts/install-finance.sh
+```
+
+Then just send the PDF in chat. The reply is three lines (period, reconciled, spend);
+the merchant classification runs in a separate one-shot job so the chat does not sit
+there for minutes.
+
+```bash
+finance-ledger list                 # statements imported, with reconcile status
+finance-ledger report               # rebuild the dashboard
+finance-ledger pending              # merchants not classified yet
+finance-ledger enrich --limit 15    # pending + web evidence, one payload for the model
+finance-ledger known                # export what is already decided
+```
+
+The dashboard is a local file, served on demand over a tunnel, never exposed:
+
+```bash
+ssh -L 8099:127.0.0.1:8099 agent
+sudo -u hermes env HOME=/home/hermes finance-ledger serve
+# http://127.0.0.1:8099/dashboard.html
+```
+
+**Merchant research needs a search key.** Brave's free tier is gone; Tavily gives 1.000
+credits a month without a card. Put `TAVILY_API_KEY=` in `/home/<agent>/.hermes/.env`.
+With a key, a company's ATECO code is looked up and mapped to a category (47.11 ->
+Spesa, 56.x -> Bar e ristoranti, 47.26 -> Smoking); without one, only names whose trade
+is in the name are classified and the rest stay open.
+
+Data stays on the box, 0600, in `/home/<agent>/.hermes/finance/`: `finance.db`,
+`known-merchants.md`, `preferences.md` (domain rules read by the skill) and
+`internal.json` (your own name and other banks, so their transfers count as internal;
+keep it out of the repo).
+
+Limits: the parser understands Revolut's Italian statement layout. Other banks need
+their own parser. Partial months are flagged, pocket/deposit moves are excluded from
+spending, and a category is only assigned with evidence.
+
+## 11. Failure alerts (~5 min, optional)
 
 systemd can run a script when a unit fails, which is how you learn that a backup died without
 checking the box every morning. The sender is plain `curl` against the Telegram Bot API, not
@@ -508,7 +556,7 @@ What this covers: a failed unit, with the last 8 journal lines, deduplicated to 
 unit per 5 minutes. What it does not cover: the VPS being dead, or the timer never firing — for
 that, have the backup ping an external heartbeat service on success and alert on silence.
 
-## 11. Final checklist
+## 12. Final checklist
 
 ```bash
 sudo /opt/hermes-vps/scripts/doctor.sh
@@ -524,13 +572,14 @@ sudo /opt/hermes-vps/scripts/doctor.sh
 - [ ] `hermes cron list` shows `morning-brief`, next run 07:00, last run `ok`
 - [ ] `hermes pairing list` shows only you
 - [ ] `restic snapshots` shows a snapshot; test restore succeeded
-- [ ] a failing unit produces a Telegram alert (section 10)
+- [ ] a failing unit produces a Telegram alert (section 11)
+- [ ] a statement PDF sent in chat imports, reconciles and renders a dashboard
 - [ ] `hermes-remind new --at "in 2m"` arrives, and `hermes-remind done <id>` clears it
 - [ ] `~/.hermes/.env`, `google_token.json`, `/etc/hermes-backup.env` are all `0600`
 
 ---
 
-## 12. Order of operations that avoids pain
+## 13. Order of operations that avoids pain
 
 1. Base OS + hardening **before** installing anything that runs as a service.
 2. Hermes + gateway **before** Telegram/Google/voice: every later step is "edit config, restart,

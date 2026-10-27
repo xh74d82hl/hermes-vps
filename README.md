@@ -23,6 +23,7 @@ Ubuntu 22.04+; the scripts only use `apt`, `systemd` and user services.
 | Backups | Optional nightly encrypted [restic](https://restic.net) backup to Backblaze B2 or any S3-compatible bucket |
 | Alerts | Telegram message when a unit fails, via a dedicated bot (no gateway dependency) |
 | Reminders | "Ricordami di…" → Google Calendar event or Task + a Telegram message at the right minute |
+| Statements | Bank statement PDF in chat → ledger reconciled against the saldo, categories, dashboard |
 
 ## What it costs
 
@@ -73,6 +74,7 @@ scripts/install-voice.sh  ffmpeg + edge-tts inside the gateway's Python
 scripts/setup-backup.sh   nightly restic backup to S3/B2 + systemd timer
 scripts/install-alerts.sh Telegram alerts when a unit fails (dedicated bot)
 scripts/install-reminders.sh  reminders that fire without the model + Calendar/Tasks mirror
+scripts/install-finance.sh    statement PDFs -> reconciled ledger + dashboard (Telegram upload)
 scripts/doctor.sh         read-only health check of the whole box
 systemd/                  backup service + timer
 examples/                 config snippets, venv wrapper, morning-brief prompt

@@ -64,12 +64,27 @@ SECTIONS = [
     ("Transazioni stornate", "reversed", False, False),
 ]
 
-INTERNAL_RE = re.compile(
+# Patterns that are specific to one person (own name, own other bank) do not belong in
+# a public repo: they live in ~/.hermes/finance/internal.json, which is never committed.
+INTERNAL_BASE = (
     r"conto potenziato|conto deposito|pocket|^deposito$|accredita eur|"
     r"interessi netti|interessi|top ?up|ricarica|"
-    r"investment portfolio|income sorter|rocchi vincenzo|isybank",
-    re.I,
+    r"investment portfolio|income sorter"
 )
+
+
+def _own_patterns() -> str:
+    path = HERMES_HOME / "finance" / "internal.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    values = list(data.get("names", [])) + list(data.get("banks", []))
+    return "|".join(re.escape(str(v)) for v in values if v)
+
+
+_OWN = _own_patterns()
+INTERNAL_RE = re.compile(INTERNAL_BASE + (f"|{_OWN}" if _OWN else ""), re.I)
 IBAN_RE = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{10,}\b")
 NOISE_RE = re.compile(
     r"segnala carta|scansiona|revolut bank|pagina \d|assistenza|depositi sono protetti|"
