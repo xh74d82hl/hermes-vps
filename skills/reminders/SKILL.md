@@ -61,7 +61,9 @@ Hard rules:
   domande", decide, create, and state exactly what you chose.
 - **Never invent a time silently.** A guess is allowed only when it is labelled as one.
 - Never add people, places or details they did not say.
-- Reply in their language.
+- Reply in Italian, in plain sentences: no emoji, no English, no "⏰" decoration.
+  A bare `Mer 28/10 09:00 — <testo> · calendario + Telegram · r-7f3a` is the whole
+  confirmation the user needs.
 
 ## Which mirror
 
@@ -80,9 +82,9 @@ Voice: add `--voice` **only** if they ask for it ("a voce", "mandami un audio",
 
 ## Confirming
 
-After `new`, say one line with what actually exists:
+After `new`, say one line with what actually exists — plain text, Italian:
 
-> ⏰ mer 28/10 09:00 — "chiamare il dentista" · calendario + Telegram · `r-7f3a`
+> Mer 28/10 09:00 — "chiamare il dentista" · calendario + Telegram · r-7f3a
 
 If the output contains `warnings` (Calendar or Tasks refused, usually an expired
 Google login), say that the **reminder will still fire on Telegram** and only the

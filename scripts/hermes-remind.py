@@ -167,7 +167,7 @@ def mirror_task(rid: str, text: str, at: datetime) -> str:
     svc = ga._tasks_service()
     body = {
         "title": text,
-        "notes": f"⏰ {at.strftime('%H:%M')} · promemoria Hermes {rid} (l'orario vive su Telegram: l'API Tasks salva solo la data)",
+        "notes": f"Promemoria {at.strftime('%H:%M')} · Hermes {rid} (l'orario vive su Telegram: l'API Tasks salva solo la data)",
         "due": ga._rfc3339_due(at.strftime("%Y-%m-%d")),
     }
     created = svc.tasks().insert(tasklist="@default", body=body).execute()
@@ -384,9 +384,10 @@ def cmd_fire(args) -> None:
         conn.execute("UPDATE reminders SET status='missed', fired_at=? WHERE id=?",
                      (now().isoformat(), row["id"]))
         conn.commit()
-        print(f"⏰ promemoria perso ({at.strftime('%d/%m %H:%M')}): {row['text']}\n{row['id']}")
+        print(f"Promemoria perso ({at.strftime('%d/%m %H:%M')}): {row['text']}\n{row['id']}")
         return
-    prefix = "⏰ (in ritardo) " + label if delta > timedelta(minutes=LATE_MINUTES) else "⏰ " + label
+    prefix = ("Promemoria (in ritardo) " + label if delta > timedelta(minutes=LATE_MINUTES)
+              else "Promemoria " + label)
     conn.execute("UPDATE reminders SET status='fired', fired_at=? WHERE id=?",
                  (now().isoformat(), row["id"]))
     conn.commit()
