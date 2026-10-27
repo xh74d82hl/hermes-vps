@@ -37,7 +37,8 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 
 CATEGORIES = [
     "Spesa", "Bar e ristoranti", "Trasporti", "Casa e bollette", "Salute",
-    "Shopping", "Abbonamenti", "Viaggi", "Svago", "Regali", "Tasse e burocrazia",
+    "Shopping", "Abbonamenti", "Viaggi", "Svago", "Smoking", "Regali",
+    "Tasse e burocrazia",
     "Investimenti", "Entrate", "Rimborsi", "Trasferimenti", "Da classificare",
 ]
 
@@ -78,6 +79,7 @@ NOISE_RE = re.compile(
 # than an unclassified merchant, because it silently poisons every later month.
 ATECO_MAP = [
     ("47.11", "Spesa"),            # supermercati, minimarket, discount
+    ("47.26", "Smoking"),          # commercio al dettaglio di prodotti del tabacco
     ("47.2", "Spesa"),             # alimentari specializzati (frutta, carne, pane)
     ("47.73", "Salute"), ("47.74", "Salute"), ("47.75", "Salute"),
     ("47.7", "Shopping"), ("47.5", "Shopping"), ("47.4", "Shopping"),
@@ -510,7 +512,7 @@ def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
 # is theatre. Ordered: the first match wins, so put the specific ones first.
 LITERAL_RULES = [
     (r"ferramenta|brico|fai da te", "Shopping"),
-    (r"tabaccheria|tabacchi|smoking", "Svago"),
+    (r"tabaccheria|tabacchi|tobacco|smoking|sigarette", "Smoking"),
     (r"farmacia|parafarmacia", "Salute"),
     (r"panificio|forno|pasticceria|gelateria|gelato", "Bar e ristoranti"),
     (r"macelleria|pescheria|enoteca|alimentari|gastronomia|salumeria", "Spesa"),
