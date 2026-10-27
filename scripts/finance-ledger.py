@@ -649,6 +649,43 @@ def ateco_lookup(name: str) -> dict:
             "snippets": [], "error": "; ".join(errors[:4])}
 
 
+def search_web(query: str, limit: int = 5) -> list[dict]:
+    """Generic web search for the agent. Tavily first, then Brave, then HTML.
+
+    This is what turns "what is TicketSms?" into one command instead of a browser.
+    """
+    key = _secret("TAVILY_API_KEY")
+    if key:
+        try:
+            data = _tavily(key, "search", {"query": query, "max_results": limit,
+                                           "search_depth": "basic"})
+            return [{"title": r.get("title", ""), "url": r.get("url", ""),
+                     "snippet": (r.get("content", "") or "")[:400]}
+                    for r in data.get("results", [])]
+        except Exception as exc:
+            first_error = f"tavily: {str(exc)[:80]}"
+    else:
+        first_error = "nessuna chiave TAVILY_API_KEY"
+
+    brave = _secret("BRAVE_API_KEY")
+    if brave:
+        import urllib.parse
+        import urllib.request
+        try:
+            payload = urllib.request.urlopen(urllib.request.Request(
+                "https://api.search.brave.com/res/v1/web/search?count="
+                f"{limit}&q=" + urllib.parse.quote_plus(query),
+                headers={"Accept": "application/json",
+                         "X-Subscription-Token": brave}), timeout=20).read()
+            data = json.loads(payload)
+            return [{"title": r.get("title", ""), "url": r.get("url", ""),
+                     "snippet": (r.get("description", "") or "")[:400]}
+                    for r in (data.get("web", {}) or {}).get("results", [])]
+        except Exception as exc:
+            first_error += f"; brave: {str(exc)[:80]}"
+    return [{"error": first_error}]
+
+
 def rekey(conn: sqlite3.Connection) -> int:
     """Recompute merchant keys after a change to the normaliser."""
     rows = conn.execute("SELECT id, merchant_raw, merchant_key FROM txn").fetchall()
@@ -963,6 +1000,10 @@ def main() -> None:
     cl.add_argument("--confidence", type=float, default=1.0)
     cl.add_argument("--by", default="manual")
 
+    sr = sub.add_parser("search", help="web search (Tavily/Brave), for the agent to reason on")
+    sr.add_argument("query")
+    sr.add_argument("--limit", type=int, default=5)
+
     lit = sub.add_parser("literals", help="classify merchants whose trade is in the name")
     lit.add_argument("--db", type=Path, default=DEFAULT_DB)
 
@@ -975,8 +1016,10 @@ def main() -> None:
     uc.add_argument("--by", default="")
 
     a = p.parse_args()
-    if a.cmd == "ateco":          # no database needed
-        print(json.dumps(ateco_lookup(a.name), indent=2, ensure_ascii=False))
+    if a.cmd in ("ateco", "search"):   # no database needed
+        payload = (ateco_lookup(a.name) if a.cmd == "ateco"
+                   else search_web(a.query, a.limit))
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
     conn = connect(a.db)
 
@@ -1000,6 +1043,8 @@ def main() -> None:
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence, a.by, a.ateco, a.source)
         print("ok")
+    elif a.cmd == "search":
+        print(json.dumps(search_web(a.query, a.limit), indent=2, ensure_ascii=False))
     elif a.cmd == "literals":
         done = []
         for row in pending_merchants(conn, include_asked=True):

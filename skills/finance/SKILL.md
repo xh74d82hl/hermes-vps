@@ -82,32 +82,43 @@ Never bind it to 0.0.0.0 and never expose the port.
 A month with €7.000 "out" is normal: most of it is pocket round-trips. Never report
 the gross movement as spending.
 
-## Merchants: search the legal name, trust the ATECO code
+## Merchants: search, reason, classify
 
-After every import, this is your job in the same turn:
+After every import this is your job in the same turn. You have a search command, so
+there is no excuse to leave a name you could have looked up:
 
-1. `finance-ledger pending` gives the list, biggest spend first.
-2. **A name with a legal form is a registered company, and companies publish an ATECO
-   code.** S.r.l., S.r.l.s., S.p.A., S.a.s., S.n.c., "Ditta Individuale", Srl, Spa: for
-   those, search the web for the legal name, not the trade name:
-   - `<name> codice ateco`
-   - `<name> partita iva`
-   - useful sources: ufficiocamerale.it, reportaziende.it, ateco.infocamere.it, registroimprese
-3. Save the code, never a category you chose yourself:
+```bash
+finance-ledger search "TicketSms" --limit 3      # Tavily, no browser
+```
+
+It returns title, url and snippet. Two searches are almost always enough: the name
+alone, then the name plus the city.
+
+Then:
+
+1. **Reason from the evidence**, not from a code alone. `TicketSms` is a site that
+   sells concert and club tickets: Svago. `Mobbi` is a power bank rental: it does not
+   fit any category cleanly, so leave it.
+2. **Use the exact `key` printed by `pending`** when classifying. Never build the key
+   yourself, or the classification lands on nothing:
    ```bash
-   finance-ledger classify --key "fabbrica v 184 s r l" --ateco 56.10 --source "<url>"
+   finance-ledger classify --key "<key from pending>" --name "Nome leggibile" \
+     --category "Svago" --source "ticketsms.it" --confidence 0.9 --by agent
    ```
-   The script maps ATECO to category and **refuses codes it does not know**, so an
-   unmapped code stays unclassified instead of becoming a wrong guess.
-4. **Spesa means supermarkets and food shops only** (47.11, 47.2x). A generic shop, a
-   clothing store, a hardware store: those are Shopping, not Spesa.
-5. **Bars and restaurants are 56.x.** A name that merely looks like a bar, with no code
-   and no confirmation, is not enough: leave it unclassified.
-6. No legal form and nothing found on the web: leave it in `Da classificare`. Ask the
-   user only for the biggest amounts (5 at most, with movements and total), and mark
-   them asked. Never invent, never guess to fill the table.
-7. If you already assigned a category without a code and it turns out wrong:
-   `finance-ledger unclassify --key "<key>"`.
+3. **Companies with a legal form**: prefer the ATECO code when one is found, because
+   it is objective:
+   ```bash
+   finance-ledger ateco --name "Mo Sarpi Srl Milano"     # -> 56.11.12 -> Bar e ristoranti
+   finance-ledger classify --key "..." --ateco 56.11.12 --source "<url>"
+   ```
+   If the code contradicts the evidence (a real estate code for a 4,50 € charge), do
+   not use it: it is a different company with the same name.
+4. **Spesa means supermarkets and food shops.** A generic shop is Shopping.
+5. **Ask the user only when the evidence is absent or contradictory**, five at most,
+   with movements and total, and mark them asked. Personal names behind Sumup, `Pos1`,
+   generic terminals: those are theirs to answer.
+6. Never invent. `Da classificare` is an honest state; a wrong category poisons every
+   following month.
 
 Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
 Shopping, Abbonamenti, Viaggi, Svago, Regali, Tasse e burocrazia, Investimenti,
