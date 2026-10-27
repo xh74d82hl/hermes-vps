@@ -7,6 +7,11 @@ After=network-online.target
 # restic wants a cache dir; under systemd there is no HOME by default
 Environment=HOME=/root
 Type=oneshot
+# oneshot units get no start timeout by default, so a restic run stuck on a dead
+# network would hang forever instead of failing -- and only a failure fires OnFailure.
+# RuntimeMaxSec= would be ignored here; for oneshot the knob is TimeoutStartSec=.
+# A normal run is ~15 s; two hours means something is wrong, not that it is slow.
+TimeoutStartSec=2h
 ExecStart=/usr/local/sbin/hermes-backup
 Nice=10
 IOSchedulingClass=idle

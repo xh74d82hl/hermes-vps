@@ -374,7 +374,8 @@ sudo /opt/hermes-vps/scripts/setup-backup.sh
 ```
 
 The script writes `/usr/local/sbin/hermes-backup`, dumps live SQLite databases safely, and
-installs a nightly timer at 03:30 with a random delay.
+installs a nightly timer at 03:30 with a random delay. The unit caps a run at `TimeoutStartSec=2h`:
+a unit that hangs on a dead network never fails, so it would never alert either.
 
 3. Verify:
 
