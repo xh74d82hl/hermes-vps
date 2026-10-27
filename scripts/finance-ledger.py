@@ -490,7 +490,8 @@ def classify(conn: sqlite3.Connection, key: str, name: str, category: str,
         " ateco=COALESCE(NULLIF(excluded.ateco,''), merchant.ateco),"
         " source=COALESCE(NULLIF(excluded.source,''), merchant.source)",
         (key, name, category, confidence, by, date.today().isoformat(), ateco, source))
-    conn.execute("UPDATE txn SET category=? WHERE merchant_key=?", (category, key))
+    conn.execute("UPDATE txn SET category=? WHERE merchant_key=? AND bucket='purchase'",
+                 (category, key))
     conn.commit()
 
 
@@ -502,8 +503,8 @@ def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
     else:
         cur = conn.execute("UPDATE merchant SET category='Da classificare', confidence=0,"
                            " resolved_by='', asked_at=NULL WHERE resolved_by=?", (by,))
-    conn.execute("UPDATE txn SET category='Da classificare' WHERE merchant_key IN"
-                 " (SELECT key FROM merchant WHERE category='Da classificare')")
+    conn.execute("UPDATE txn SET category='Da classificare' WHERE bucket='purchase'"
+                 " AND merchant_key IN (SELECT key FROM merchant WHERE category='Da classificare')")
     conn.commit()
     return cur.rowcount
 
