@@ -328,6 +328,10 @@ def bucket_for(amount: float, merchant: str) -> str:
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
+    try:
+        path.chmod(0o600)      # transactions are personal data
+    except OSError:
+        pass
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(merchant)")}
@@ -746,6 +750,10 @@ def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
                          f"{r['resolved_by']}{(' / ' + r['source'][:40]) if r['source'] else ''} |")
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            out.chmod(0o600)
+        except OSError:
+            pass
     return rows
 
 
@@ -1008,6 +1016,10 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(o), encoding="utf-8")
+    try:
+        out.chmod(0o600)
+    except OSError:
+        pass
     return {"dashboard": str(out), **{k: v for k, v in s.items() if k != "statements"}}
 
 
