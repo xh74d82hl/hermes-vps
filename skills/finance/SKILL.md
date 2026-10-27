@@ -13,6 +13,10 @@ metadata:
 
 # Finance
 
+**Prima di ogni cosa leggi `~/.hermes/finance/preferences.md`** (se esiste): sono le
+regole dell'utente su questo dominio. Non stanno nella memoria globale di Hermes di
+proposito, cosi non entrano nelle conversazioni che non riguardano le spese.
+
 One command does everything; **do not parse the PDF yourself and do not trust any
 number you did not get from it**:
 
@@ -131,15 +135,15 @@ Due destinazioni diverse, e vanno scelte bene:
 | Cosa dice | Dove finisce | Comando |
 |---|---|---|
 | "quella è una ferramenta", "TicketSms è biglietti concerti" | fatto su un esercente, vale per sempre | `finance-ledger classify ...` |
-| "la Spesa solo per i supermercati", "non mostrarmi i pocket", "niente emoji" | preferenza di comportamento | tool `memory`, target `memory` |
-| "non mi fidare dei totali arrotondati" | preferenza | tool `memory`, target `user` |
+| "la Spesa solo per i supermercati", "non mostrarmi i pocket" | regola di questo dominio | aggiungi una riga a `~/.hermes/finance/preferences.md` |
+| "rispondi sempre in italiano", "niente emoji" | preferenza trasversale | tool `memory` |
 
-Regola: **una correzione su un esercente non è una preferenza**, e viceversa. Se sbagli
-destinazione, la correzione non torna mai piu.
+Regola: **una correzione su un esercente non è una preferenza**, e viceversa. E una
+regola sulle spese non va nella memoria globale: la memoria entra nel prompt di ogni
+conversazione, quindi la pagherebbero anche le chat che non c'entrano.
 
-Dopo aver salvato una preferenza, conferma in una riga ("annotato: Spesa solo per i
-supermercati") e continua. La memoria entra nel prompt all'inizio di ogni sessione,
-quindi vale dalle sessioni successive (un job cron la vede subito, la chat aperta no).
+Dopo aver salvato, conferma in una riga ("annotato: Spesa solo per i supermercati") e
+continua: `preferences.md` viene letto all'inizio di ogni turno, quindi vale subito.
 
 Se una preferenza contraddice una regola di questa skill, la preferenza vince: aggiorna
 il comportamento e dillo all'utente.
