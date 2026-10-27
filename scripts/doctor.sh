@@ -106,6 +106,22 @@ as_agent 'hermes pairing list 2>/dev/null | sed -n "/Approved/,/^$/p"' | sed 's/
 JOBS="$(as_agent 'hermes cron list 2>/dev/null | grep -c "\[active\]"')"
 [ "${JOBS:-0}" -ge 1 ] && ok "$JOBS active cron job(s)" || warn "no active cron jobs"
 
+head_ "Reminders"
+if [ -x /usr/local/bin/hermes-remind ]; then
+  ok "hermes-remind installed"
+  REM_PENDING="$(as_agent 'hermes-remind list 2>/dev/null | grep -c "\[pending"' 2>/dev/null || true)"
+  case "$REM_PENDING" in ''|*[!0-9]*) REM_PENDING=0 ;; esac
+  ok "$REM_PENDING pending reminder(s)"
+  as_agent 'test -f ~/.hermes/skills/productivity/reminders/SKILL.md' 2>/dev/null \
+    && ok "reminders skill installed" || warn "reminders skill missing (scripts/install-reminders.sh)"
+  REM_UNSCHED="$(as_agent 'hermes-remind list --all 2>/dev/null | grep -c "\[unscheduled"' 2>/dev/null || true)"
+  case "$REM_UNSCHED" in ''|*[!0-9]*) REM_UNSCHED=0 ;; esac
+  [ "$REM_UNSCHED" -eq 0 ] && ok "no unscheduled reminders" \
+    || bad "$REM_UNSCHED reminder(s) without a cron job (run: hermes-remind reconcile)"
+else
+  warn "hermes-remind not installed (run scripts/install-reminders.sh)"
+fi
+
 head_ "Backups"
 TIMERS="$(systemctl list-timers --all 2>/dev/null || true)"
 case "$TIMERS" in *hermes-backup*)

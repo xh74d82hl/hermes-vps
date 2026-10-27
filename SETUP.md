@@ -402,7 +402,51 @@ Repository URL examples:
 
 ---
 
-## 9. Failure alerts (~5 min, optional)
+## 9. Reminders (~10 min, optional)
+
+"Remind me to call the dentist tomorrow at 9" should ask once if the time is missing, land
+somewhere you can see it, and actually fire. Three things have to agree, so one command writes all
+three:
+
+| Part | What it is | Why |
+|---|---|---|
+| clock | a `hermes cron` **one-shot** job, `--no-agent` | fires without the model, so a reminder survives an expired login or an empty quota |
+| mirror | Google **Calendar** event (with a real popup reminder) when it has a time, Google **Task** when it only has a day | the phone rings from Calendar; Tasks is the list |
+| ledger | `~/.hermes/reminders.db` | so `done` / `snooze` / `rm` cannot update only half of it |
+
+The split is not a preference. The Google Tasks API stores **the date only** — it discards the
+time and has no reminder field — so a Task can never ring at 15:30. A Calendar event can.
+
+```bash
+sudo /opt/hermes-vps/scripts/install-reminders.sh
+```
+
+That installs `/usr/local/bin/hermes-remind`, the CLI at `~/.hermes/scripts/hermes-remind.py`, and
+the `reminders` skill that teaches the agent to ask instead of guessing.
+
+```bash
+hermes-remind new --text "chiamare il dentista" --at "2026-10-28T09:00:00+01:00"
+hermes-remind new --text "rinnovare il passaporto" --at "2026-11-02T09:00:00+01:00" --mirror task
+hermes-remind new --text "togliere la pasta" --at "in 9m" --mirror none --voice
+hermes-remind list
+hermes-remind done r-7f3a
+hermes-remind snooze r-7f3a 10m
+```
+
+Verify with a real one, two minutes out — and then restart the gateway before it fires, to see the
+late path:
+
+```bash
+hermes-remind new --text "prova" --at "in 2m" --mirror none
+hermes gateway restart          # or stop, wait past the time, start
+hermes-remind list              # the row goes pending → fired
+hermes cron list                # the job is named remind:r-xxxx
+```
+
+What it does not do: recurring reminders (`hermes cron create "every monday 9am"` instead), and
+phone calls — a Telegram bot can only send a message or a voice note.
+
+## 10. Failure alerts (~5 min, optional)
 
 systemd can run a script when a unit fails, which is how you learn that a backup died without
 checking the box every morning. The sender is plain `curl` against the Telegram Bot API, not
@@ -451,7 +495,7 @@ What this covers: a failed unit, with the last 8 journal lines, deduplicated to 
 unit per 5 minutes. What it does not cover: the VPS being dead, or the timer never firing — for
 that, have the backup ping an external heartbeat service on success and alert on silence.
 
-## 10. Final checklist
+## 11. Final checklist
 
 ```bash
 sudo /opt/hermes-vps/scripts/doctor.sh
@@ -467,12 +511,13 @@ sudo /opt/hermes-vps/scripts/doctor.sh
 - [ ] `hermes cron list` shows `morning-brief`, next run 07:00, last run `ok`
 - [ ] `hermes pairing list` shows only you
 - [ ] `restic snapshots` shows a snapshot; test restore succeeded
-- [ ] a failing unit produces a Telegram alert (section 9)
+- [ ] a failing unit produces a Telegram alert (section 10)
+- [ ] `hermes-remind new --at "in 2m"` arrives, and `hermes-remind done <id>` clears it
 - [ ] `~/.hermes/.env`, `google_token.json`, `/etc/hermes-backup.env` are all `0600`
 
 ---
 
-## 11. Order of operations that avoids pain
+## 12. Order of operations that avoids pain
 
 1. Base OS + hardening **before** installing anything that runs as a service.
 2. Hermes + gateway **before** Telegram/Google/voice: every later step is "edit config, restart,

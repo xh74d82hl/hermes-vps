@@ -27,3 +27,7 @@ notes/
 *.swp
 .idea/
 .vscode/
+
+# python bytecode from local syntax checks
+__pycache__/
+*.pyc
