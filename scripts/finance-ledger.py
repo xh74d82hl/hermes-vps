@@ -21,6 +21,7 @@ Commands
 from __future__ import annotations
 
 import argparse
+import time
 import hashlib
 import html
 import json
@@ -170,6 +171,15 @@ CREATE TABLE IF NOT EXISTS merchant (
     confidence  REAL NOT NULL DEFAULT 0,
     resolved_by TEXT NOT NULL DEFAULT '',
     resolved_at TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS account (
+    uid         TEXT PRIMARY KEY,
+    name        TEXT,
+    kind        TEXT,            -- CACC, SVGS, ...
+    iban_last4  TEXT,
+    balance     REAL,
+    currency    TEXT,
+    updated_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS txn_date ON txn(date);
 """
@@ -342,6 +352,9 @@ def connect(path: Path) -> sqlite3.Connection:
     for column, decl in (("seen", "INTEGER NOT NULL DEFAULT 0"), ("summary", "TEXT")):
         if column not in stmt_cols:
             conn.execute(f"ALTER TABLE statement ADD COLUMN {column} {decl}")
+    txn_cols = {r["name"] for r in conn.execute("PRAGMA table_info(txn)")}
+    if "bank_status" not in txn_cols:
+        conn.execute("ALTER TABLE txn ADD COLUMN bank_status TEXT")
     for column in ("asked_at", "ateco", "source"):
         if column not in cols:
             conn.execute(f"ALTER TABLE merchant ADD COLUMN {column} TEXT")
@@ -680,6 +693,7 @@ def ateco_lookup(name: str) -> dict:
 
     # Last resort: scrape Brave/DDG HTML. Usually rate-limited from a datacenter IP,
     # so this only helps on a small VPS or a home connection.
+    import urllib.error
     import urllib.parse
     import urllib.request
 
@@ -1003,6 +1017,187 @@ def repair(conn: sqlite3.Connection) -> list[str]:
         fixed.append(f"{cur.rowcount} prelievi spostati in Contanti")
     conn.commit()
     return fixed
+
+
+EB_HOME = HERMES_HOME / "enablebanking"
+EB_BASE = "https://api.enablebanking.com"
+EB_PRODUCT = {"CACC": "conto", "SVGS": "deposito"}
+
+
+def _eb_token() -> str:
+    """Sign the short-lived JWT Enable Banking requires, with openssl only."""
+    import subprocess
+    import tempfile
+
+    app_id = ""
+    for line in (EB_HOME / "app.env").read_text(encoding="utf-8").splitlines():
+        if line.startswith("APP_ID="):
+            app_id = line.split("=", 1)[1].strip()
+    if not app_id:
+        raise RuntimeError("APP_ID mancante in enablebanking/app.env")
+
+    def b64(data: bytes) -> str:
+        import base64
+        return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+    now = int(time.time())
+    header = b64(json.dumps({"typ": "JWT", "alg": "RS256", "kid": app_id}).encode())
+    payload = b64(json.dumps({"iss": "enablebanking.com", "aud": "api.enablebanking.com",
+                              "iat": now, "exp": now + 3600}).encode())
+    signing_input = f"{header}.{payload}".encode()
+    proc = subprocess.run(["openssl", "dgst", "-sha256", "-sign",
+                           str(EB_HOME / "private.key")],
+                          input=signing_input, capture_output=True, check=True)
+    return f"{header}.{payload}.{b64(proc.stdout)}"
+
+
+def _eb_get(path: str) -> dict:
+    import urllib.request
+    req = urllib.request.Request(EB_BASE + path,
+                                 headers={"Authorization": f"Bearer {_eb_token()}"})
+    return json.loads(urllib.request.urlopen(req, timeout=40).read())
+
+
+def _eb_post(path: str, body: dict) -> dict:
+    import urllib.request
+    req = urllib.request.Request(
+        EB_BASE + path, data=json.dumps(body).encode(),
+        headers={"Authorization": f"Bearer {_eb_token()}",
+                 "Content-Type": "application/json"})
+    try:
+        return json.loads(urllib.request.urlopen(req, timeout=40).read())
+    except urllib.error.HTTPError as exc:
+        return json.loads(exc.read() or b"{}")
+
+
+def bank_auth() -> dict:
+    """Ask for a new consent: prints the URL the user opens once."""
+    redirect = "https://example.invalid/callback"
+    for line in (EB_HOME / "app.env").read_text(encoding="utf-8").splitlines():
+        if line.startswith("REDIRECT_URL="):
+            redirect = line.split("=", 1)[1].strip()
+    import datetime
+    valid = (datetime.datetime.now(datetime.timezone.utc)
+             + datetime.timedelta(days=170)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _eb_post("/auth", {
+        "access": {"valid_until": valid},
+        "aspsp": {"name": "Revolut", "country": "IT"},
+        "state": "hermes",
+        "redirect_url": redirect,
+        "psu_type": "personal",
+    })
+
+
+def bank_session(code: str) -> dict:
+    """Exchange the one-time code for a session and store it, 0600."""
+    data = _eb_post("/sessions", {"code": code})
+    if data.get("session_id"):
+        EB_HOME.mkdir(parents=True, exist_ok=True)
+        path = EB_HOME / "session.json"
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        path.chmod(0o600)
+    return data
+
+
+def _eb_session() -> dict:
+    return json.loads((EB_HOME / "session.json").read_text(encoding="utf-8"))
+
+
+def session_days_left() -> int | None:
+    """Days until the bank consent expires, or None when there is no session."""
+    import datetime
+    try:
+        valid = (_eb_session().get("access") or {}).get("valid_until")
+    except (OSError, ValueError):
+        return None
+    if not valid:
+        return None
+    when = datetime.datetime.fromisoformat(valid.replace("Z", "+00:00"))
+    return (when - datetime.datetime.now(datetime.timezone.utc)).days
+
+
+def bank_sync(conn: sqlite3.Connection, days_back: int = 30) -> dict:
+    """Pull both Revolut accounts into the same txn table the statements fill.
+
+    Rows are keyed by the bank's entry_reference plus the product, which is the same
+    UUID the PDF prints: a statement imported later lands on the same rows instead of
+    duplicating them.
+    """
+    import datetime
+
+    session = _eb_session()
+    since = (date.today() - timedelta(days=days_back)).isoformat()
+    added = updated = 0
+    accounts = []
+
+    for acct in session.get("accounts", []):
+        uid = acct["uid"]
+        product = EB_PRODUCT.get(acct.get("cash_account_type", ""), "conto")
+        iban = (acct.get("account_id") or {}).get("iban") or ""
+
+        try:
+            bal = _eb_get(f"/accounts/{uid}/balances").get("balances", [])
+        except Exception:
+            bal = []
+        amount = None
+        for b in bal:
+            if b.get("balance_type") in ("ITAV", "CLAV", "OPAV"):
+                amount = float((b.get("balance_amount") or {}).get("amount") or 0)
+                break
+        conn.execute(
+            "INSERT INTO account (uid, name, kind, iban_last4, balance, currency, updated_at)"
+            " VALUES (?,?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET balance=excluded.balance,"
+            " currency=excluded.currency, updated_at=excluded.updated_at, name=excluded.name",
+            (uid, acct.get("name", ""), acct.get("cash_account_type", ""), iban[-4:],
+             amount, acct.get("currency", "EUR"),
+             datetime.datetime.now().astimezone().isoformat(timespec="seconds")))
+        accounts.append({"name": acct.get("name"), "type": acct.get("cash_account_type"),
+                          "iban_last4": iban[-4:], "balance": amount, "product": product})
+
+        key = None
+        for _page in range(10):
+            path = (f"/accounts/{uid}/transactions?date_from={since}"
+                    + (f"&continuation_key={key}" if key else ""))
+            data = _eb_get(path)
+            for t in data.get("transactions", []):
+                ref = t.get("entry_reference") or t.get("transaction_id")
+                if not ref:
+                    continue
+                amt = float((t.get("transaction_amount") or {}).get("amount") or 0)
+                if (t.get("credit_debit_indicator") or "DBIT") == "DBIT":
+                    amt = -abs(amt)
+                raw = ((t.get("creditor") or {}).get("name")
+                       or (t.get("debtor") or {}).get("name") or "").strip()
+                if not raw:
+                    raw = " ".join(t.get("remittance_information") or [])
+                key_name = merchant_key(raw)
+                known = conn.execute("SELECT category FROM merchant WHERE key=?",
+                                     (key_name,)).fetchone()
+                bucket = bucket_for(amt, raw)
+                category = known["category"] if known else contract_category(bucket)
+                txid = f"{ref}:{product}"
+                existing = conn.execute("SELECT id FROM txn WHERE id=?", (txid,)).fetchone()
+                if existing:
+                    conn.execute("UPDATE txn SET bank_status=? WHERE id=?",
+                                 (t.get("status"), txid))
+                    updated += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO txn (id, statement_id, product, date, amount, merchant_raw,"
+                    " merchant_key, category, bucket, bank_status)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (txid, "bank", product, t.get("booking_date") or since, amt, raw,
+                     key_name, category, bucket, t.get("status")))
+                conn.execute("INSERT OR IGNORE INTO merchant (key, name) VALUES (?,?)",
+                             (key_name, raw))
+                added += 1
+            key = data.get("continuation_key")
+            if not key:
+                break
+
+    conn.commit()
+    return {"accounts": accounts, "added": added, "updated": updated,
+            "since": since, "days_left": session_days_left()}
 
 
 def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
@@ -1396,6 +1591,14 @@ def main() -> None:
         sp = sub.add_parser(name, help=helptext)
         sp.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    ba = sub.add_parser("bank-auth", help="new bank consent: prints the URL")
+    bss = sub.add_parser("bank-session", help="exchange the consent code for a session")
+    bss.add_argument("code")
+
+    bs = sub.add_parser("bank-sync", help="pull the bank feed into the ledger")
+    bs.add_argument("--db", type=Path, default=DEFAULT_DB)
+    bs.add_argument("--days", type=int, default=30)
+
     rv = sub.add_parser("review", help="classified merchants never confirmed")
     rv.add_argument("--db", type=Path, default=DEFAULT_DB)
 
@@ -1443,6 +1646,10 @@ def main() -> None:
     uc.add_argument("--by", default="")
 
     a = p.parse_args()
+    if a.cmd in ("bank-auth", "bank-session"):   # no database needed
+        payload = bank_auth() if a.cmd == "bank-auth" else bank_session(a.code)
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return
     if a.cmd == "detect":              # no database needed
         print(json.dumps(detect(a.path), indent=2, ensure_ascii=False))
         return
@@ -1480,6 +1687,17 @@ def main() -> None:
         print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "anomalies":
         print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "bank-sync":
+        print(json.dumps(bank_sync(conn, a.days), indent=2, ensure_ascii=False))
+        left = session_days_left()
+        if left is not None and left <= 21:
+            import subprocess as _sp
+            msg = (f"Consenso bancario in scadenza tra {left} giorni (Enable Banking).\n\n"
+                   "Per rinnovarlo:\n"
+                   "1. sudo -u hermes env HOME=/home/hermes finance-ledger bank-auth\n"
+                   "2. apri il link, autorizza Revolut, incolla il codice a:\n"
+                   "   finance-ledger bank-session <codice>")
+            _sp.run(["/usr/local/sbin/hermes-notify"], input=msg, text=True, check=False)
     elif a.cmd == "review":
         rows = review(conn)
         if not rows:

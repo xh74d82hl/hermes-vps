@@ -503,6 +503,14 @@ Data stays on the box, 0600, in `/home/<agent>/.hermes/finance/`: `finance.db`,
 `internal.json` (your own name and other banks, so their transfers count as internal;
 keep it out of the repo).
 
+Optional, the bank feed: with an Enable Banking application (free in restricted mode) you
+can pull transactions weekly instead of waiting for a statement. It gives date, amount,
+merchant and the same transaction UUID the PDF prints, so the two never duplicate. It does
+**not** give the time of day or the bank's own category: Revolut leaves both fields empty.
+`finance-ledger bank-auth` prints the consent link, `finance-ledger bank-session <code>`
+stores it, `finance-ledger bank-sync` pulls. The consent lasts about six months and the
+daily guard warns three weeks before it expires.
+
 Limits: the parser understands Revolut's Italian statement layout. Other banks need
 their own parser. Partial months are flagged, pocket/deposit moves are excluded from
 spending, and a category is only assigned with evidence.

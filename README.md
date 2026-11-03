@@ -32,6 +32,7 @@ Ubuntu 22.04+; the scripts only use `apt`, `systemd` and user services.
 | 07:15 daily | the same brief as a Telegram voice note | edge-tts |
 | 08:00 daily | resource guard: disk, memory, gateway, backup age, Google token age. Silent unless a threshold is crossed | none |
 | 09:00 on the 1st | recurring charges and category anomalies from the ledger | none |
+| Saturday 08:30 | bank sync via Enable Banking: transactions into the ledger, balances refreshed | Revolut consent (renews every ~6 months) |
 | Sunday 09:00 | weekly health digest: doctor, cron, backups, resources, auth | none |
 | quarterly, 1st at 04:30 | restore drill: restore the newest snapshot and verify it | restic |
 | 03:30 daily | encrypted restic backup + heartbeat ping | restic, B2 |

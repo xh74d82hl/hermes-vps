@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly Hermes bank sync (Saturday morning)
+
+[Timer]
+OnCalendar=Sat 08:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

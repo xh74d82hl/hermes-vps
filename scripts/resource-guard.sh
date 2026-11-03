@@ -9,6 +9,7 @@ RSS_LIMIT_MB=700
 DISK_LIMIT=85
 MEM_LIMIT_MB=250
 TOKEN_AGE_LIMIT_D=6
+BANK_CONSENT_WARN_D=21
 msgs=()
 
 as_agent() { sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" XDG_RUNTIME_DIR="/run/user/$(id -u "$AGENT_USER")" \
@@ -41,6 +42,27 @@ print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 
   case "${AGE:-}" in
     ''|*[!0-9]*) msgs+=("Backup: non riesco a leggere l'ultimo snapshot") ;;
     *) [ "$AGE" -gt 26 ] && msgs+=("Backup fermo da ${AGE}h (soglia 26h)") ;;
+  esac
+fi
+
+# bank consent: warn before it expires, with the renewal procedure
+SESS="$AGENT_HOME/.hermes/enablebanking/session.json"
+if [ -r "$SESS" ]; then
+  LEFT="$(python3 -c '
+import datetime, json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    until = (d.get("access") or {}).get("valid_until")
+    if until:
+        when = datetime.datetime.fromisoformat(until.replace("Z", "+00:00"))
+        print((when - datetime.datetime.now(datetime.timezone.utc)).days)
+except Exception:
+    pass
+' "$SESS" 2>/dev/null)"
+  case "${LEFT:-}" in
+    ''|*[!0-9-]*) ;;
+    *) [ "$LEFT" -le "$BANK_CONSENT_WARN_D" ] && \
+         msgs+=("Consenso bancario in scadenza tra ${LEFT} giorni: finance-ledger bank-auth, poi bank-session <codice>") ;;
   esac
 fi
 

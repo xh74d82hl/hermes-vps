@@ -1,0 +1,12 @@
+[Unit]
+Description=Hermes bank sync (Enable Banking)
+After=network-online.target
+Wants=network-online.target
+OnFailure=hermes-alert@%n.service
+
+[Service]
+Type=oneshot
+User=hermes
+Environment=HOME=/home/hermes
+ExecStart=/usr/local/bin/finance-ledger bank-sync --days 21
+Nice=10

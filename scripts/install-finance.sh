@@ -33,6 +33,13 @@ for skill in finance intake; do
     "$HERE/skills/$skill/SKILL.md" "$AGENT_HOME/.hermes/skills/productivity/$skill/SKILL.md"
 done
 
+log "Weekly bank sync (systemd, no model)"
+install -m 644 "$HERE/systemd/hermes-bank-sync.service" /etc/systemd/system/
+install -m 644 "$HERE/systemd/hermes-bank-sync.timer" /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now hermes-bank-sync.timer
+systemctl list-timers hermes-bank-sync.timer --no-pager | sed -n '2p'
+
 log "Monthly insights shim (cron --no-agent, zero tokens)"
 cat > "$AGENT_HOME/.hermes/scripts/finance-insights.sh" <<'EOF'
 #!/bin/sh
