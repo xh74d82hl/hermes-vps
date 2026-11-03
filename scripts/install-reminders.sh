@@ -53,6 +53,11 @@ echo "$AGENT_HOME/.hermes/skills/productivity/reminders/SKILL.md"
 log "Per-reminder wrapper dir"
 install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.hermes/scripts/reminders"
 
+log "Voice brief"
+install -o "$AGENT_USER" -g "$AGENT_USER" -m 755 \
+  "$HERE/scripts/brief-voice.sh" "$AGENT_HOME/.hermes/scripts/brief-voice.sh"
+echo "$AGENT_HOME/.hermes/scripts/brief-voice.sh"
+
 log "Check"
 sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" hermes-remind list || true
 sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" hermes-remind --help >/dev/null && echo "CLI ok"

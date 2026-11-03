@@ -1,0 +1,9 @@
+[Unit]
+Description=Quarterly Hermes restore drill
+
+[Timer]
+OnCalendar=*-03,06,09,12-01 04:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target

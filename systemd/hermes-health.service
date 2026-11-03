@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes hermes-health
+OnFailure=hermes-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hermes-health-digest
+Nice=10

@@ -24,6 +24,19 @@ Ubuntu 22.04+; the scripts only use `apt`, `systemd` and user services.
 | Alerts | Telegram message when a unit fails, via a dedicated bot (no gateway dependency) |
 | Reminders | "Ricordami di…" → Google Calendar event or Task + a Telegram message at the right minute |
 | Statements | Bank statement PDF in chat → ledger reconciled against the saldo, categories, dashboard |
+### What runs on its own
+
+| When | What | Needs |
+|---|---|---|
+| 07:00 daily | morning brief (mail, calendar, tasks) | Google auth |
+| 07:15 daily | the same brief as a Telegram voice note | edge-tts |
+| 08:00 daily | resource guard: disk, memory, gateway, backup age, Google token age. Silent unless a threshold is crossed | none |
+| 09:00 on the 1st | recurring charges and category anomalies from the ledger | none |
+| Sunday 09:00 | weekly health digest: doctor, cron, backups, resources, auth | none |
+| quarterly, 1st at 04:30 | restore drill: restore the newest snapshot and verify it | restic |
+| 03:30 daily | encrypted restic backup + heartbeat ping | restic, B2 |
+| on failure | Telegram alert with the last journal lines | systemd |
+
 
 ## What it costs
 
@@ -75,6 +88,7 @@ scripts/setup-backup.sh   nightly restic backup to S3/B2 + systemd timer
 scripts/install-alerts.sh Telegram alerts when a unit fails (dedicated bot)
 scripts/install-reminders.sh  reminders that fire without the model + Calendar/Tasks mirror
 scripts/install-finance.sh    statement PDFs -> reconciled ledger + dashboard (Telegram upload)
+scripts/install-ops.sh        weekly health digest, daily resource guard, quarterly restore drill
 scripts/doctor.sh         read-only health check of the whole box
 systemd/                  backup service + timer
 examples/                 config snippets, venv wrapper, morning-brief prompt

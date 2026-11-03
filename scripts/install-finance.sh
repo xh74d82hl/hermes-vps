@@ -26,10 +26,22 @@ exec /usr/bin/env python3 "$AGENT_HOME/.hermes/scripts/finance-ledger.py" "\$@"
 EOF
 chmod 755 /usr/local/bin/finance-ledger
 
-log "Skill"
-install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 755 "$AGENT_HOME/.hermes/skills/productivity/finance"
-install -o "$AGENT_USER" -g "$AGENT_USER" -m 644 \
-  "$HERE/skills/finance/SKILL.md" "$AGENT_HOME/.hermes/skills/productivity/finance/SKILL.md"
+log "Skills"
+for skill in finance intake; do
+  install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 755 "$AGENT_HOME/.hermes/skills/productivity/$skill"
+  install -o "$AGENT_USER" -g "$AGENT_USER" -m 644 \
+    "$HERE/skills/$skill/SKILL.md" "$AGENT_HOME/.hermes/skills/productivity/$skill/SKILL.md"
+done
+
+log "Monthly insights shim (cron --no-agent, zero tokens)"
+cat > "$AGENT_HOME/.hermes/scripts/finance-insights.sh" <<'EOF'
+#!/bin/sh
+# stdout is delivered verbatim by the cron job: no model involved
+exec /usr/local/bin/finance-ledger insights
+EOF
+chown "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.hermes/scripts/finance-insights.sh"
+chmod 755 "$AGENT_HOME/.hermes/scripts/finance-insights.sh"
+echo "$AGENT_HOME/.hermes/scripts/finance-insights.sh"
 
 log "Data dir"
 install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.hermes/finance"

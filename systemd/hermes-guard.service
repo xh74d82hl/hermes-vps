@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes hermes-guard
+OnFailure=hermes-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hermes-resource-guard
+Nice=10

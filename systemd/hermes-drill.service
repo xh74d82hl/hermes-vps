@@ -1,0 +1,8 @@
+[Unit]
+Description=Hermes hermes-drill
+OnFailure=hermes-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/hermes-restore-drill
+Nice=10

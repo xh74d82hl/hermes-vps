@@ -732,6 +732,137 @@ def enrich(conn: sqlite3.Connection, limit: int = 15) -> list[dict]:
     return out
 
 
+def _median(values: list[float]) -> float:
+    values = sorted(values)
+    mid = len(values) // 2
+    return values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+
+
+def subscriptions(conn: sqlite3.Connection) -> list[dict]:
+    """Recurring charges found in the ledger: same merchant, regular spacing, similar amount.
+
+    Two months of data is enough to see the pattern, so a merchant with two payments about
+    a month apart is reported as "probabile" instead of being hidden until month four.
+    """
+    rows = conn.execute(
+        "SELECT merchant_key, merchant_raw, date, amount FROM txn"
+        " WHERE bucket='purchase' AND amount < 0 ORDER BY merchant_key, date").fetchall()
+    by_key: dict[str, list] = defaultdict(list)
+    for r in rows:
+        by_key[r["merchant_key"]].append(r)
+
+    out = []
+    for key, items in by_key.items():
+        if len(items) < 2:
+            continue
+        dates = [date.fromisoformat(i["date"]) for i in items]
+        gaps = [(b - a).days for a, b in zip(dates, dates[1:])]
+        median_gap = _median(gaps)
+        amounts = [abs(i["amount"]) for i in items]
+        spread = (max(amounts) - min(amounts)) / max(amounts) if max(amounts) else 0
+        if not (5 <= median_gap <= 45) or spread > 0.35:
+            continue
+        if len(items) >= 3 and 25 <= median_gap <= 35:
+            cadence, per_year = "mensile", 12
+        elif len(items) == 2 and 25 <= median_gap <= 35:
+            cadence, per_year = "probabile mensile", 12
+        elif 6 <= median_gap <= 8:
+            cadence, per_year = "settimanale", 52
+        elif 26 <= median_gap <= 32:
+            cadence, per_year = "mensile", 12
+        else:
+            continue
+        avg = sum(amounts) / len(amounts)
+        out.append({
+            "name": items[0]["merchant_raw"][:44],
+            "cadence": cadence,
+            "count": len(items),
+            "avg": round(avg, 2),
+            "last": round(amounts[-1], 2),
+            "delta_pct": round(100 * (amounts[-1] - avg) / avg) if avg else 0,
+            "yearly": round(avg * per_year, 2),
+        })
+    return sorted(out, key=lambda x: -x["yearly"])
+
+
+def anomalies(conn: sqlite3.Connection) -> list[dict]:
+    """Categories that moved a lot against the previous months, ignoring partial months."""
+    months = [r["m"] for r in conn.execute(
+        "SELECT DISTINCT substr(date,1,7) m FROM txn WHERE bucket='purchase' ORDER BY m")]
+    if len(months) < 3:
+        return []
+    current = months[-1]
+    baseline_months = months[-4:-1]          # up to three previous months
+    per = defaultdict(lambda: defaultdict(float))
+    for r in conn.execute(
+            "SELECT substr(date,1,7) m, category, SUM(-amount) v FROM txn"
+            " WHERE bucket='purchase' GROUP BY m, category"):
+        per[r["m"]][r["category"]] += r["v"]
+    out = []
+    for cat, value in per[current].items():
+        base = [per[m].get(cat, 0) for m in baseline_months]
+        base = [b for b in base if b > 0]
+        if len(base) < 2:
+            continue
+        mean = sum(base) / len(base)
+        if mean <= 0 or value <= mean:
+            continue
+        change = 100 * (value - mean) / mean
+        if change >= 40 and (value - mean) >= 20:
+            out.append({"category": cat, "current": round(value, 2),
+                        "mean": round(mean, 2), "change_pct": round(change)})
+    return sorted(out, key=lambda x: -x["change_pct"])
+
+
+def insights(conn: sqlite3.Connection) -> str:
+    """Plain text for a monthly cron message. Empty string means nothing to say."""
+    subs = subscriptions(conn)
+    anom = anomalies(conn)
+    lines = []
+    if subs:
+        lines.append("Abbonamenti e addebiti ricorrenti")
+        for s in subs[:15]:
+            note = ""
+            if s["delta_pct"] >= 10:
+                note = f", +{s['delta_pct']}% sull'ultimo"
+            lines.append(f"- {s['name']}: {money(s['avg'])} {s['cadence']}, "
+                         f"~{money(s['yearly'])}/anno{note}")
+        lines.append(f"Totale ricorrente stimato: {money(sum(s['yearly'] for s in subs))}/anno")
+    if anom:
+        lines.append("")
+        lines.append("Categorie fuori scala rispetto ai mesi prima")
+        for a in anom[:8]:
+            lines.append(f"- {a['category']}: {money(a['current'])} contro "
+                         f"{money(a['mean'])} di media (+{a['change_pct']}%)")
+    return "\n".join(lines)
+
+
+def detect(path: Path) -> dict:
+    """What is this file? Used by the intake skill so a statement is never mistaken
+    for a document, and a document never gets parsed as a bank statement."""
+    if path.suffix.lower() == ".pdf":
+        try:
+            st = parse_statement(path)
+        except Exception:
+            st = None
+        if st and st.rows and st.summary:
+            return {"type": "statement", "period": f"{st.period_start} -> {st.period_end}",
+                    "rows": len(st.rows), "action": "finance-ledger ingest"}
+        try:
+            text = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                                  capture_output=True, text=True, check=True).stdout
+        except Exception as exc:
+            return {"type": "unreadable", "error": str(exc)[:120]}
+    else:
+        text = path.read_text(encoding="utf-8", errors="replace")
+
+    preview = re.sub(r"\s+", " ", text).strip()[:400]
+    if re.search(r"estratto conto|denaro in uscita|saldo iniziale", text, re.I):
+        return {"type": "statement-unparsed", "hint": "sembra un estratto conto ma il parser non lo legge",
+                "preview": preview}
+    return {"type": "document", "chars": len(text), "preview": preview}
+
+
 def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
     """The growing map of merchants already decided, as a file you can read and correct.
 
@@ -1076,6 +1207,15 @@ def main() -> None:
     cl.add_argument("--confidence", type=float, default=1.0)
     cl.add_argument("--by", default="manual")
 
+    for name, helptext in (("insights", "recurring charges and category anomalies"),
+                           ("subscriptions", "recurring charges only"),
+                           ("anomalies", "category anomalies only")):
+        sp = sub.add_parser(name, help=helptext)
+        sp.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    dt = sub.add_parser("detect", help="is this PDF a statement, or a generic document?")
+    dt.add_argument("path", type=Path)
+
     kn = sub.add_parser("known", help="export the merchants already classified")
     kn.add_argument("--db", type=Path, default=DEFAULT_DB)
     kn.add_argument("--out", type=Path, default=DEFAULT_DB.parent / "known-merchants.md")
@@ -1100,6 +1240,9 @@ def main() -> None:
     uc.add_argument("--by", default="")
 
     a = p.parse_args()
+    if a.cmd == "detect":              # no database needed
+        print(json.dumps(detect(a.path), indent=2, ensure_ascii=False))
+        return
     if a.cmd in ("ateco", "search"):   # no database needed
         payload = (ateco_lookup(a.name) if a.cmd == "ateco"
                    else search_web(a.query, a.limit))
@@ -1127,6 +1270,13 @@ def main() -> None:
     elif a.cmd == "classify":
         classify(conn, a.key, a.name or a.key, a.category, a.confidence, a.by, a.ateco, a.source)
         print("ok")
+    elif a.cmd == "insights":
+        text = insights(conn)
+        print(text if text else "Nessun abbonamento ricorrente e nessuna anomalia di categoria.")
+    elif a.cmd == "subscriptions":
+        print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "anomalies":
+        print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "known":
         rows = known(conn, a.out)
         print(f"{len(rows)} esercenti noti -> {a.out}")
