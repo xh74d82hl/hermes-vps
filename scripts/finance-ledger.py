@@ -178,6 +178,8 @@ CREATE TABLE IF NOT EXISTS account (
     kind        TEXT,            -- CACC, SVGS, ...
     iban_last4  TEXT,
     balance     REAL,
+    balance_source TEXT,
+    label       TEXT,
     currency    TEXT,
     updated_at  TEXT
 );
@@ -352,6 +354,10 @@ def connect(path: Path) -> sqlite3.Connection:
     for column, decl in (("seen", "INTEGER NOT NULL DEFAULT 0"), ("summary", "TEXT")):
         if column not in stmt_cols:
             conn.execute(f"ALTER TABLE statement ADD COLUMN {column} {decl}")
+    acc_cols = {r["name"] for r in conn.execute("PRAGMA table_info(account)")}
+    for column in ("balance_source", "label"):
+        if column not in acc_cols:
+            conn.execute(f"ALTER TABLE account ADD COLUMN {column} TEXT")
     txn_cols = {r["name"] for r in conn.execute("PRAGMA table_info(txn)")}
     if "bank_status" not in txn_cols:
         conn.execute("ALTER TABLE txn ADD COLUMN bank_status TEXT")
@@ -1116,6 +1122,33 @@ def session_days_left() -> int | None:
     return (when - datetime.datetime.now(datetime.timezone.utc)).days
 
 
+def derived_balance(conn: sqlite3.Connection, product: str) -> tuple[float, str] | None:
+    """Balance from the last statement closing plus movements after it.
+
+    Revolut reports 0.00 for the savings account, and the statement is the only place
+    where its real balance appears (the "deposito" product).
+    """
+    best = None
+    for row in conn.execute("SELECT period_end, summary FROM statement"
+                            " WHERE summary IS NOT NULL ORDER BY period_end"):
+        try:
+            summary = json.loads(row["summary"])
+        except (TypeError, ValueError):
+            continue
+        closing = (summary.get(product) or {}).get("closing")
+        if closing is None:
+            continue
+        if best is None or row["period_end"] > best[0]:
+            best = (row["period_end"], float(closing))
+    if best is None:
+        return None
+    end, closing = best
+    moved = conn.execute(
+        "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND date > ?",
+        (product, end)).fetchone()[0]
+    return round(closing + moved, 2), f"derivato: chiusura {end} + movimenti successivi"
+
+
 def bank_sync(conn: sqlite3.Connection, days_back: int = 30) -> dict:
     """Pull both Revolut accounts into the same txn table the statements fill.
 
@@ -1144,15 +1177,22 @@ def bank_sync(conn: sqlite3.Connection, days_back: int = 30) -> dict:
             if b.get("balance_type") in ("ITAV", "CLAV", "OPAV"):
                 amount = float((b.get("balance_amount") or {}).get("amount") or 0)
                 break
+        source = "api"
+        if not amount and product == "deposito":
+            derived = derived_balance(conn, product)
+            if derived:
+                amount, source = derived
         conn.execute(
-            "INSERT INTO account (uid, name, kind, iban_last4, balance, currency, updated_at)"
-            " VALUES (?,?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET balance=excluded.balance,"
+            "INSERT INTO account (uid, name, kind, iban_last4, balance, balance_source,"
+            " currency, updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET"
+            " balance=excluded.balance, balance_source=excluded.balance_source,"
             " currency=excluded.currency, updated_at=excluded.updated_at, name=excluded.name",
             (uid, acct.get("name", ""), acct.get("cash_account_type", ""), iban[-4:],
-             amount, acct.get("currency", "EUR"),
+             amount, source, acct.get("currency", "EUR"),
              datetime.datetime.now().astimezone().isoformat(timespec="seconds")))
         accounts.append({"name": acct.get("name"), "type": acct.get("cash_account_type"),
-                          "iban_last4": iban[-4:], "balance": amount, "product": product})
+                          "iban_last4": iban[-4:], "balance": amount,
+                          "balance_source": source, "product": product})
 
         key = None
         for _page in range(10):
@@ -1439,6 +1479,22 @@ def report(conn: sqlite3.Connection, out: Path, month: str = "") -> dict:
          f"<div class='hint'>{money(s['unclassified'])} senza categoria</div></div>",
          "</div>"]
 
+    if not month:
+        accounts = conn.execute(
+            "SELECT label, name, kind, balance, balance_source, currency, updated_at"
+            " FROM account ORDER BY kind").fetchall()
+        if accounts:
+            o.append("<h2>Conti</h2><table><tr><th>Conto</th><th class='n'>Saldo</th>"
+                     "<th>Fonte</th><th>Aggiornato</th></tr>")
+            for a in accounts:
+                label = a["label"] or ("Operativo" if a["kind"] == "CACC" else a["kind"])
+                src = a["balance_source"] or ""
+                o.append(f"<tr><td>{html.escape(label)}</td>"
+                         f"<td class='n'>{money(a['balance'] or 0)}</td>"
+                         f"<td class='muted'>{html.escape(src[:46])}</td>"
+                         f"<td class='muted'>{(a['updated_at'] or '')[:16].replace('T', ' ')}</td></tr>")
+            o.append("</table>")
+
     o.append("<h2>Dove vanno gli acquisti</h2><div class='cols'>")
     o.append(donut(segments, s["purchases"], money(s["purchases"]))
              if segments else "<div class='empty'>nessun acquisto importato</div>")
@@ -1595,6 +1651,11 @@ def main() -> None:
     bss = sub.add_parser("bank-session", help="exchange the consent code for a session")
     bss.add_argument("code")
 
+    al = sub.add_parser("account-label", help="name an account yourself")
+    al.add_argument("label")
+    al.add_argument("--db", type=Path, default=DEFAULT_DB)
+    al.add_argument("--uid", default="")
+
     bs = sub.add_parser("bank-sync", help="pull the bank feed into the ledger")
     bs.add_argument("--db", type=Path, default=DEFAULT_DB)
     bs.add_argument("--days", type=int, default=30)
@@ -1687,6 +1748,15 @@ def main() -> None:
         print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "anomalies":
         print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "account-label":
+        row = (conn.execute("SELECT uid FROM account WHERE uid=?", (a.uid,)).fetchone()
+               if a.uid else
+               conn.execute("SELECT uid FROM account WHERE kind<>'CACC' LIMIT 1").fetchone())
+        if not row:
+            raise SystemExit("nessun conto da etichettare: esegui prima bank-sync")
+        conn.execute("UPDATE account SET label=? WHERE uid=?", (a.label, row["uid"]))
+        conn.commit()
+        print(f"etichettato {row['uid']} come '{a.label}'")
     elif a.cmd == "bank-sync":
         print(json.dumps(bank_sync(conn, a.days), indent=2, ensure_ascii=False))
         left = session_days_left()
