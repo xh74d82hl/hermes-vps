@@ -463,6 +463,9 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
         "skipped": st.skipped,
         "problems": problems[:10],
         "notes": notes[:10],
+        "archive": archive_check(conn, dict(conn.execute(
+            "SELECT id, period_start, period_end, summary FROM statement WHERE id=?",
+            (digest,)).fetchone())),
         "spend": round(conn.execute(
             "SELECT COALESCE(SUM(-amount),0) FROM txn WHERE statement_id=? AND bucket='purchase'",
             (digest,)).fetchone()[0], 2),
@@ -876,6 +879,65 @@ def detect(path: Path) -> dict:
     return {"type": "document", "chars": len(text), "preview": preview}
 
 
+def archive_check(conn: sqlite3.Connection, stmt: dict) -> dict:
+    """Level 2: does the database hold exactly this statement for its own period?
+
+    A statement can add up (level 1) and still be wrong in the archive: a duplicate, a
+    row lost to an error, or a second statement covering the same days. This compares
+    the stored rows inside the period against the totals the statement printed.
+    """
+    if not stmt.get("summary"):
+        return {"known": False, "problems": ["riepilogo non salvato: ricontrollo impossibile"]}
+    try:
+        expected = json.loads(stmt["summary"])
+    except (TypeError, ValueError):
+        return {"known": False, "problems": ["riepilogo illeggibile"]}
+
+    actual: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
+    for r in conn.execute(
+            "SELECT product, amount FROM txn WHERE date BETWEEN ? AND ?",
+            (stmt["period_start"], stmt["period_end"])):
+        if r["amount"] < 0:
+            actual[r["product"]][0] += -r["amount"]
+        else:
+            actual[r["product"]][1] += r["amount"]
+
+    problems, notes = [], []
+    for product, exp in expected.items():
+        if product == "totale":
+            continue
+        got_o, got_i = actual.get(product, [0.0, 0.0])
+        d_out, d_in = got_o - exp["out"], got_i - exp["into"]
+        if abs(d_out) <= 0.02 and abs(d_in) <= 0.02:
+            continue
+        if abs(d_out - d_in) <= 0.02 and abs(d_out) <= 1.0:
+            notes.append(f"{product}: differenza lordo/netto {d_out:+.2f}, saldo invariato")
+            continue
+        problems.append(f"{product}: in archivio {got_o:.2f}/{got_i:.2f}, "
+                        f"l'estratto dice {exp['out']:.2f}/{exp['into']:.2f}")
+    return {"known": True, "ok": not problems, "problems": problems, "notes": notes}
+
+
+def backfill_summary(conn: sqlite3.Connection, pdf: Path) -> dict:
+    """Store the statement summary for a file imported before it was collected.
+
+    Without the summary the archive check cannot run; the PDF still has it.
+    """
+    digest = hashlib.sha256(pdf.read_bytes()).hexdigest()
+    row = conn.execute("SELECT id, summary FROM statement WHERE id=?", (digest,)).fetchone()
+    if not row:
+        return {"status": "not-imported", "filename": pdf.name}
+    if row["summary"]:
+        return {"status": "already-there", "filename": pdf.name}
+    st = parse_statement(pdf)
+    if not st.summary:
+        return {"status": "no-summary-in-file", "filename": pdf.name}
+    conn.execute("UPDATE statement SET summary=? WHERE id=?",
+                 (json.dumps(st.summary, ensure_ascii=False), digest))
+    conn.commit()
+    return {"status": "filled", "filename": pdf.name, "products": list(st.summary)}
+
+
 def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
     """The growing map of merchants already decided, as a file you can read and correct.
 
@@ -925,6 +987,11 @@ def summary(conn: sqlite3.Connection, month: str = "") -> dict:
     sp = lambda b: round(one(
         "SELECT COALESCE(SUM(-amount),0) FROM txn WHERE bucket=? AND amount<0" + mw, b), 2)
     stw = " WHERE substr(period_start,1,7)=?" if month else ""
+    stmt_rows = [dict(r) for r in conn.execute(
+        "SELECT id, filename, period_start, period_end, partial, reconciled, rows, seen,"
+        " problems, summary FROM statement" + stw + " ORDER BY period_start", ma)]
+    for row in stmt_rows:
+        row["archive"] = archive_check(conn, row)
     return {
         "purchases": sp("purchase"),
         "transfers": sp("transfer"),
@@ -935,9 +1002,7 @@ def summary(conn: sqlite3.Connection, month: str = "") -> dict:
             "SELECT COALESCE(SUM(-amount),0) FROM txn"
             " WHERE bucket='purchase' AND category='Da classificare'" + mw), 2),
         "bad_rows": one("SELECT COUNT(*) FROM txn WHERE check_ok=0" + mw),
-        "statements": [dict(r) for r in conn.execute(
-            "SELECT filename, period_start, period_end, partial, reconciled, rows, problems"
-            " FROM statement" + stw + " ORDER BY period_start", ma)],
+        "statements": stmt_rows,
     }
 
 
@@ -1141,16 +1206,23 @@ def report(conn: sqlite3.Connection, out: Path, month: str = "") -> dict:
                      f"<div class='lbl'>{m}</div></div>")
         o.append("</div>")
 
-    o.append("<h2>Estratti</h2><table><tr><th>File</th><th>Periodo</th><th class='n'>Righe</th>"
-             "<th>Stato</th></tr>")
+    o.append("<h2>Estratti</h2><table><tr><th>Periodo</th><th class='n'>Nuove</th>"
+             "<th>Estratto</th><th>In archivio</th></tr>")
     for st in statements:
-        state = ("<span class='tag ok'>quadra</span>" if st["reconciled"]
-                 else "<span class='tag warn'>non quadra</span>")
+        file_state = ("<span class='tag ok'>quadra</span>" if st["reconciled"]
+                      else "<span class='tag warn'>non quadra</span>")
         if st["partial"]:
-            state += " <span class='tag muted'>parziale</span>"
-        o.append(f"<tr><td>{html.escape(st['filename'][:44])}</td>"
-                 f"<td>{st['period_start']} → {st['period_end']}</td>"
-                 f"<td class='n'>{st['rows']}</td><td>{state}</td></tr>")
+            file_state += " <span class='tag muted'>parziale</span>"
+        arch = st.get("archive") or {}
+        if not arch.get("known"):
+            arch_state = "<span class='tag muted'>non verificabile</span>"
+        elif arch.get("ok"):
+            arch_state = "<span class='tag ok'>quadra</span>"
+        else:
+            arch_state = "<span class='tag warn'>differenza</span>"
+        o.append(f"<tr><td>{st['period_start']} → {st['period_end']}</td>"
+                 f"<td class='n'>{st['rows']}</td><td>{file_state}</td>"
+                 f"<td>{arch_state}</td></tr>")
     o.append("</table>")
 
     o.append("<h2>Categorie (le stesse della torta)</h2><table><tr><th></th><th>Categoria</th>"
@@ -1257,6 +1329,14 @@ def main() -> None:
         sp = sub.add_parser(name, help=helptext)
         sp.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    bf = sub.add_parser("backfill", help="store the summary of an old statement file")
+    bf.add_argument("pdf", type=Path)
+    bf.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    ck = sub.add_parser("check", help="per statement: does the file add up, and does the "
+                                      "archive match its period?")
+    ck.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     dt = sub.add_parser("detect", help="is this PDF a statement, or a generic document?")
     dt.add_argument("path", type=Path)
 
@@ -1321,6 +1401,27 @@ def main() -> None:
         print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "anomalies":
         print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "backfill":
+        print(json.dumps(backfill_summary(conn, a.pdf), indent=2, ensure_ascii=False))
+    elif a.cmd == "check":
+        for st in summary(conn)["statements"]:
+            print(f"{st['period_start']} -> {st['period_end']}")
+            print(f"  estratto: {'quadra' if st['reconciled'] else 'NON quadra'}"
+                  + (" (parziale)" if st["partial"] else ""))
+            for p in (st["problems"] or "").splitlines():
+                if p:
+                    print(f"    - {p}")
+            arch = st.get("archive") or {}
+            if not arch.get("known"):
+                print("  archivio: non verificabile (riepilogo non salvato)")
+            elif arch.get("ok"):
+                print("  archivio: quadra")
+            else:
+                print("  archivio: differenza")
+            for p in arch.get("problems", []):
+                print(f"    - {p}")
+            for n in arch.get("notes", []):
+                print(f"    nota: {n}")
     elif a.cmd == "known":
         rows = known(conn, a.out)
         print(f"{len(rows)} esercenti noti -> {a.out}")

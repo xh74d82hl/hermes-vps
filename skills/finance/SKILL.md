@@ -53,6 +53,21 @@ No tables, no category list, no emoji: the dashboard carries the detail.
 - `status: unrecognised` → say the PDF does not look like a statement and that
   nothing was saved.
 
+**Due controlli, due risposte diverse.** Non sono la stessa cosa e vanno detti separatamente:
+
+| Livello | Domanda | Campo nel JSON |
+|---|---|---|
+| estratto | il PDF, da solo, quadra? catena dei saldi e totali per prodotto contro il riepilogo | `reconciled` + `problems` |
+| archivio | dopo il caricamento, le righe nel database per quel periodo corrispondono ai totali dell'estratto? | `archive.ok` + `archive.problems` |
+
+Un estratto può quadrare e l'archivio no: righe duplicate, una riga persa, oppure due estratti
+che coprono gli stessi giorni. In quel caso dillo con la differenza esatta e non nasconderlo;
+`finance-ledger check` mostra i due livelli per ogni estratto e le note (le differenze
+lordo/netto sugli interessi sono normali, non sono errori).
+
+Se l'archivio dice "non verificabile" significa che quel file è stato importato prima che il
+riepilogo venisse salvato: se il PDF esiste ancora, `finance-ledger backfill <pdf>` lo recupera.
+
 After a successful import attach **two** files, each on its own line:
 
 ```
