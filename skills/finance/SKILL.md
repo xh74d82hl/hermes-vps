@@ -188,6 +188,24 @@ Valid categories: Spesa, Bar e ristoranti, Trasporti, Casa e bollette, Salute,
 Shopping, Abbonamenti, Viaggi, Svago, Smoking, Pagamenti a rate, Regali,
 Tasse e burocrazia, Investimenti, Entrate, Rimborsi, Trasferimenti.
 
+## Manutenzione
+
+| Comando | Quando |
+|---|---|
+| `finance-ledger review` | esercenti classificati ma mai confermati (fiducia < 0.9), con importi. È il debito di precisione da smaltire |
+| `finance-ledger audit --sample 20` | campione casuale di acquisti classificati, da controllare a occhio. Correggi con `classify`, poi dichiara quante erano sbagliate |
+| `finance-ledger repair` | righe con bucket e categoria incoerenti, e prelievi contanti da mostrare come `Contanti` |
+| `finance-ledger check` | i due livelli di riconciliazione, estratto e archivio |
+
+Categorie, incluse quelle nuove: Spesa, Bar e ristoranti, Trasporti, Casa e bollette,
+Salute, Shopping, Abbigliamento, Casa e arredamento, Elettronica, Abbonamenti, Viaggi,
+Svago, Smoking, Pagamenti a rate, Contanti, Regali, Tasse e burocrazia, Investimenti,
+Entrate, Rimborsi, Trasferimenti.
+
+`Spesa` resta solo supermercati e alimentari. Un negozio di vestiti è `Abbigliamento`,
+il bricolage è `Casa e arredamento`, l'elettronica è `Elettronica`. Il contante
+prelevato è `Contanti`: è denaro uscito, ma non è un negozio.
+
 ## Quando l'utente dice qualcosa di durevole
 
 Due destinazioni diverse, e vanno scelte bene:

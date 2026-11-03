@@ -37,7 +37,8 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 
 CATEGORIES = [
     "Spesa", "Bar e ristoranti", "Trasporti", "Casa e bollette", "Salute",
-    "Shopping", "Abbonamenti", "Viaggi", "Svago", "Smoking", "Pagamenti a rate",
+    "Shopping", "Abbigliamento", "Casa e arredamento", "Elettronica",
+    "Abbonamenti", "Viaggi", "Svago", "Smoking", "Pagamenti a rate", "Contanti",
     "Regali", "Tasse e burocrazia",
     "Investimenti", "Entrate", "Rimborsi", "Trasferimenti", "Da classificare",
 ]
@@ -546,6 +547,25 @@ def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
 
 # Words that name the trade itself. "Ferramenta X" is a hardware store; asking the web
 # is theatre. Ordered: the first match wins, so put the specific ones first.
+# Chains whose name alone settles the category: no search, no ATECO, same answer
+# every month. Checked before the generic trade words below.
+CHAIN_RULES = [
+    (r"conad|lidl|esselunga|carrefour|coop\b|eurospin|penny|pam\b|bennet|iper|"
+     r"in'?s|sigma|todis|aldi|famila|unisuper|sisa|cecchi|gabrielli|pim\b", "Spesa"),
+    (r"eni\b|eni\s?\d|q8|esso|tamoil|\bip\b|repsol|api\b|totalerg|tigros|"
+     r"distributore", "Trasporti"),
+    (r"trenitalia|italo|atac|flixbus|itabus|busitalia|uber|free now|taxi", "Trasporti"),
+    (r"mcdonald|burger king|kfc|pizza hut|roadhouse|old wild west|wagamama", "Bar e ristoranti"),
+    (r"netflix|spotify|disney|prime video|amazon prime|dazn|now tv|youtube premium|"
+     r"apple\.com/bill|google one|opencode|openai|anthropic", "Abbonamenti"),
+    (r"amazon", "Shopping"),
+    (r"zara|h&m|\bhm\b|mango|decathlon|zalando|shein|temu|aliexpress", "Abbigliamento"),
+    (r"ikea|leroy merlin|brico|obi\b|kasanova|jysk|maisons du monde|mondo convenienza",
+     "Casa e arredamento"),
+    (r"unieuro|mediaworld|euronics|apple store|samsung|comet\b", "Elettronica"),
+    (r"prelievo|prelevamento|cash withdrawal|sportello automatico", "Contanti"),
+]
+
 LITERAL_RULES = [
     (r"paga in \d+ rate|pagamento rateale|klarna|scalapay|soisy|affirm", "Pagamenti a rate"),
     (r"ferramenta|brico|fai da te", "Shopping"),
@@ -553,7 +573,8 @@ LITERAL_RULES = [
     (r"farmacia|parafarmacia", "Salute"),
     (r"panificio|forno|pasticceria|gelateria|gelato", "Bar e ristoranti"),
     (r"macelleria|pescheria|enoteca|alimentari|gastronomia|salumeria", "Spesa"),
-    (r"minimarket|supermercato|supermercati|discount|ipermercato|market", "Spesa"),
+    (r"\bminimarket\b|\bsupermercato|\bsupermercati\b|\bdiscount\b|\bipermercato\b|"
+     r"\bmarket\b", "Spesa"),
     (r"bar\b|caffe|caffè|pizzeria|ristorante|trattoria|osteria|pub\b|bistrot|hamburger", "Bar e ristoranti"),
     (r"edicola|libreria|cartoleria", "Shopping"),
     (r"profumeria|gioielleria|ottica", "Shopping"),
@@ -566,7 +587,7 @@ LITERAL_RULES = [
 
 def literal_category(name: str) -> str:
     low = (name or "").lower()
-    for pattern, category in LITERAL_RULES:
+    for pattern, category in CHAIN_RULES + LITERAL_RULES:
         if re.search(pattern, low):
             return category
     return ""
@@ -936,6 +957,52 @@ def backfill_summary(conn: sqlite3.Connection, pdf: Path) -> dict:
                  (json.dumps(st.summary, ensure_ascii=False), digest))
     conn.commit()
     return {"status": "filled", "filename": pdf.name, "products": list(st.summary)}
+
+
+def review(conn: sqlite3.Connection) -> list[dict]:
+    """Classified merchants that were never confirmed: the precision risk."""
+    rows = conn.execute(
+        "SELECT m.key, m.name, m.category, m.confidence, m.resolved_by,"
+        " COUNT(*) n, SUM(-t.amount) v"
+        " FROM merchant m JOIN txn t ON t.merchant_key = m.key"
+        " WHERE t.bucket='purchase' AND m.category <> 'Da classificare'"
+        " AND m.confidence < 0.9"
+        " GROUP BY m.key ORDER BY v DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+def audit(conn: sqlite3.Connection, sample: int = 20, seed: int = 0) -> list[dict]:
+    """Random classified purchases, for a human to mark right or wrong.
+
+    Without this, '85% classified' says how many labels exist, not how many are right.
+    """
+    import random
+
+    rows = conn.execute(
+        "SELECT id, date, merchant_raw, category, amount FROM txn"
+        " WHERE bucket='purchase' AND category <> 'Da classificare' ORDER BY id").fetchall()
+    picked = random.Random(seed).sample(rows, min(sample, len(rows)))
+    return [dict(r) for r in picked]
+
+
+def repair(conn: sqlite3.Connection) -> list[str]:
+    """Rows whose bucket contradicts their category, left over from older imports."""
+    fixed = []
+    for bucket, category in (("transfer", "Trasferimenti"), ("income", "Entrate"),
+                             ("refund", "Rimborsi"), ("internal", "Trasferimenti")):
+        cur = conn.execute(
+            "UPDATE txn SET bucket=?, category=? WHERE bucket='purchase' AND category=?",
+            (bucket, category, category))
+        if cur.rowcount:
+            fixed.append(f"{cur.rowcount} righe da acquisto a {bucket}")
+    # cash withdrawn is money that will be spent: show it as Contanti, not as a transfer
+    cur = conn.execute(
+        "UPDATE txn SET bucket='purchase', category='Contanti' WHERE bucket='transfer'"
+        " AND merchant_key IN (SELECT key FROM merchant WHERE category='Contanti')")
+    if cur.rowcount:
+        fixed.append(f"{cur.rowcount} prelievi spostati in Contanti")
+    conn.commit()
+    return fixed
 
 
 def known(conn: sqlite3.Connection, out: Path | None = None) -> list[dict]:
@@ -1329,6 +1396,18 @@ def main() -> None:
         sp = sub.add_parser(name, help=helptext)
         sp.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    rv = sub.add_parser("review", help="classified merchants never confirmed")
+    rv.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    au = sub.add_parser("audit", help="random classified purchases to check by hand")
+    au.add_argument("--db", type=Path, default=DEFAULT_DB)
+    au.add_argument("--sample", type=int, default=20)
+    au.add_argument("--seed", type=int, default=0)
+    au.add_argument("--json", action="store_true")
+
+    rp = sub.add_parser("repair", help="fix rows whose bucket contradicts the category")
+    rp.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     bf = sub.add_parser("backfill", help="store the summary of an old statement file")
     bf.add_argument("pdf", type=Path)
     bf.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -1401,6 +1480,29 @@ def main() -> None:
         print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "anomalies":
         print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "review":
+        rows = review(conn)
+        if not rows:
+            print("Nessun esercente da confermare: tutto a fiducia alta.")
+        else:
+            total = sum(r["v"] for r in rows)
+            print(f"{len(rows)} esercenti da confermare, {money(total)} di acquisti")
+            for r in rows[:30]:
+                print(f"- {r['name'][:44]:<44} {r['category']:<20} "
+                      f"{r['confidence']:.2f} {r['resolved_by']:<7} "
+                      f"{r['n']} mov  {money(r['v'])}")
+    elif a.cmd == "audit":
+        rows = audit(conn, a.sample, a.seed)
+        if a.json:
+            print(json.dumps(rows, indent=2, ensure_ascii=False))
+        else:
+            print(f"campione di {len(rows)} acquisti (seed {a.seed}): giusti o sbagliati?")
+            for r in rows:
+                print(f"- {r['date']}  {r['merchant_raw'][:40]:<40} {r['category']:<20} "
+                      f"{money(r['amount'])}")
+    elif a.cmd == "repair":
+        fixed = repair(conn)
+        print("\n".join(fixed) if fixed else "niente da riparare")
     elif a.cmd == "backfill":
         print(json.dumps(backfill_summary(conn, a.pdf), indent=2, ensure_ascii=False))
     elif a.cmd == "check":
