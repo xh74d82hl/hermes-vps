@@ -55,8 +55,13 @@ install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 700 "$AGENT_HOME/.hermes/scripts
 
 log "Voice brief"
 install -o "$AGENT_USER" -g "$AGENT_USER" -m 755 \
-  "$HERE/scripts/brief-voice.sh" "$AGENT_HOME/.hermes/scripts/brief-voice.sh"
-echo "$AGENT_HOME/.hermes/scripts/brief-voice.sh"
+  "$HERE/scripts/brief-speak.sh" "$AGENT_HOME/.hermes/scripts/brief-speak.sh"
+install -o "$AGENT_USER" -g "$AGENT_USER" -m 755 \
+  "$HERE/scripts/brief-latest.sh" "$AGENT_HOME/.hermes/scripts/brief-latest.sh"
+install -d -o "$AGENT_USER" -g "$AGENT_USER" -m 755 "$AGENT_HOME/.hermes/skills/productivity/voice-brief"
+install -o "$AGENT_USER" -g "$AGENT_USER" -m 644 \
+  "$HERE/skills/voice-brief/SKILL.md" "$AGENT_HOME/.hermes/skills/productivity/voice-brief/SKILL.md"
+echo "$AGENT_HOME/.hermes/scripts/brief-speak.sh"
 
 log "Check"
 sudo -u "$AGENT_USER" env HOME="$AGENT_HOME" hermes-remind list || true
