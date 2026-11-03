@@ -30,7 +30,7 @@ import sqlite3
 import subprocess
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
@@ -143,7 +143,9 @@ CREATE TABLE IF NOT EXISTS statement (
     partial       INTEGER NOT NULL DEFAULT 0,
     reconciled    INTEGER NOT NULL DEFAULT 0,
     rows          INTEGER NOT NULL DEFAULT 0,
-    problems      TEXT
+    seen          INTEGER NOT NULL DEFAULT 0,
+    problems      TEXT,
+    summary       TEXT
 );
 CREATE TABLE IF NOT EXISTS txn (
     id           TEXT PRIMARY KEY,           -- Revolut UUID when present
@@ -335,6 +337,10 @@ def connect(path: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(merchant)")}
+    stmt_cols = {r["name"] for r in conn.execute("PRAGMA table_info(statement)")}
+    for column, decl in (("seen", "INTEGER NOT NULL DEFAULT 0"), ("summary", "TEXT")):
+        if column not in stmt_cols:
+            conn.execute(f"ALTER TABLE statement ADD COLUMN {column} {decl}")
     for column in ("asked_at", "ateco", "source"):
         if column not in cols:
             conn.execute(f"ALTER TABLE merchant ADD COLUMN {column} TEXT")
@@ -359,6 +365,8 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
     # previous balance and would be silently dropped
     state: dict[str, float] = {k: v["opening"] for k, v in st.summary.items() if k != "totale"}
     added = 0
+    seen = 0
+    parsed: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
 
     for row in st.rows:
         # amount from the balance chain; the printed amount must agree
@@ -387,26 +395,29 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
             f"{row.product}|{row.date}|{amount}|{key}|{balance_after}".encode()).hexdigest())
         known = conn.execute("SELECT category FROM merchant WHERE key=?", (key,)).fetchone()
         category = known["category"] if known else contract_category(bucket)
-        conn.execute(
+        cur = conn.execute(
             "INSERT OR IGNORE INTO txn (id, statement_id, product, date, amount, balance_after,"
             " amount_printed, check_ok, merchant_raw, merchant_key, category, bucket)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (txid, digest, row.product, row.date, amount, balance_after, printed, 1 if ok else 0,
              merchant, key, category, bucket))
         conn.execute("INSERT OR IGNORE INTO merchant (key, name) VALUES (?,?)", (key, merchant))
-        added += 1
+        if cur.rowcount:
+            added += 1
+        else:
+            seen += 1
+        if amount < 0:
+            parsed[row.product][0] += -amount
+        else:
+            parsed[row.product][1] += amount
 
     # per-product totals must match the statement's own out/in columns
     notes: list[str] = []
     for product, summary in st.summary.items():
         if product == "totale":
             continue
-        got = conn.execute(
-            "SELECT COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) o,"
-            "       COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) i,"
-            "       COALESCE(SUM(amount),0) net"
-            " FROM txn WHERE statement_id=? AND product=?", (digest, product)).fetchone()
-        d_out, d_in = got["o"] - summary["out"], got["i"] - summary["into"]
+        got_o, got_i = parsed.get(product, [0.0, 0.0])
+        d_out, d_in = got_o - summary["out"], got_i - summary["into"]
         closes = abs(summary["opening"] - summary["out"] + summary["into"] - summary["closing"]) <= 0.01
         if abs(d_out) <= 0.02 and abs(d_in) <= 0.02:
             continue
@@ -417,8 +428,8 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
                          f"saldo invariato")
             continue
         problems.append(
-            f"{product}: uscite {got['o']:.2f} vs {summary['out']:.2f}, "
-            f"entrate {got['i']:.2f} vs {summary['into']:.2f}")
+            f"{product}: uscite {got_o:.2f} vs {summary['out']:.2f}, "
+            f"entrate {got_i:.2f} vs {summary['into']:.2f}")
 
     # the statement's own summary must close: opening - out + in == closing
     for product, s in st.summary.items():
@@ -435,9 +446,10 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
     reconciled = 0 if problems else 1
     conn.execute(
         "INSERT INTO statement (id, filename, imported_at, period_start, period_end, partial,"
-        " reconciled, rows, problems) VALUES (?,?,?,?,?,?,?,?,?)",
+        " reconciled, rows, seen, problems, summary) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (digest, pdf.name, date.today().isoformat(), st.period_start, st.period_end,
-         partial, reconciled, added, "\n".join((problems + notes)[:20])))
+         partial, reconciled, added, seen, "\n".join((problems + notes)[:20]),
+         json.dumps(st.summary, ensure_ascii=False)))
     conn.commit()
 
     return {
@@ -447,6 +459,7 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
         "partial": bool(partial),
         "reconciled": bool(reconciled),
         "rows": added,
+        "already_present": seen,
         "skipped": st.skipped,
         "problems": problems[:10],
         "notes": notes[:10],
@@ -905,23 +918,26 @@ def rekey(conn: sqlite3.Connection) -> int:
     return changed
 
 
-def summary(conn: sqlite3.Connection) -> dict:
-    one = lambda sql, *a: conn.execute(sql, a).fetchone()[0]
-    sp = lambda b, s: round(one(
-        "SELECT COALESCE(SUM(-amount),0) FROM txn WHERE bucket=? AND amount<0" + s, b), 2)
+def summary(conn: sqlite3.Connection, month: str = "") -> dict:
+    mw = " AND substr(date,1,7)=?" if month else ""
+    ma = (month,) if month else ()
+    one = lambda sql, *a: conn.execute(sql, a + ma).fetchone()[0]
+    sp = lambda b: round(one(
+        "SELECT COALESCE(SUM(-amount),0) FROM txn WHERE bucket=? AND amount<0" + mw, b), 2)
+    stw = " WHERE substr(period_start,1,7)=?" if month else ""
     return {
-        "purchases": sp("purchase", ""),
-        "transfers": sp("transfer", ""),
-        "internal": sp("internal", ""),
-        "income": round(one("SELECT COALESCE(SUM(amount),0) FROM txn WHERE bucket='income'"), 2),
-        "refunds": round(one("SELECT COALESCE(SUM(amount),0) FROM txn WHERE bucket='refund'"), 2),
+        "purchases": sp("purchase"),
+        "transfers": sp("transfer"),
+        "internal": sp("internal"),
+        "income": round(one("SELECT COALESCE(SUM(amount),0) FROM txn WHERE bucket='income'" + mw), 2),
+        "refunds": round(one("SELECT COALESCE(SUM(amount),0) FROM txn WHERE bucket='refund'" + mw), 2),
         "unclassified": round(one(
             "SELECT COALESCE(SUM(-amount),0) FROM txn"
-            " WHERE bucket='purchase' AND category='Da classificare'"), 2),
-        "bad_rows": one("SELECT COUNT(*) FROM txn WHERE check_ok=0"),
+            " WHERE bucket='purchase' AND category='Da classificare'" + mw), 2),
+        "bad_rows": one("SELECT COUNT(*) FROM txn WHERE check_ok=0" + mw),
         "statements": [dict(r) for r in conn.execute(
             "SELECT filename, period_start, period_end, partial, reconciled, rows, problems"
-            " FROM statement ORDER BY period_start")],
+            " FROM statement" + stw + " ORDER BY period_start", ma)],
     }
 
 
@@ -981,6 +997,10 @@ tr:last-child td{border-bottom:none}
 .empty{color:var(--muted);font-size:13.5px;padding:10px 0}
 footer{margin-top:44px;padding-top:14px;border-top:1px solid var(--rule);
   color:var(--muted);font-size:11.5px;display:flex;justify-content:space-between;gap:12px}
+.months-nav{display:flex;flex-wrap:wrap;gap:10px;margin:-8px 0 24px}
+.months-nav a{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--rule);
+  border-radius:3px;padding:3px 8px}
+.months-nav a:hover{color:var(--ink);border-color:var(--muted)}
 @media (max-width:720px){
   body{padding:24px 16px 48px}
   .kpis{grid-template-columns:repeat(2,1fr)}
@@ -1018,19 +1038,25 @@ def donut(segments: list[tuple[str, float, str]], total: float, center: str) -> 
         '</svg>')
 
 
-def report(conn: sqlite3.Connection, out: Path) -> dict:
-    s = summary(conn)
-    months = [r["m"] for r in conn.execute(
+MONTH_NAMES = ["", "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno", "luglio",
+               "agosto", "settembre", "ottobre", "novembre", "dicembre"]
+
+
+def report(conn: sqlite3.Connection, out: Path, month: str = "") -> dict:
+    s = summary(conn, month)
+    mw = " AND substr(date,1,7)=?" if month else ""
+    ma = (month,) if month else ()
+    months = [month] if month else [r["m"] for r in conn.execute(
         "SELECT DISTINCT substr(date,1,7) m FROM txn ORDER BY m")]
     per_month = defaultdict(float)
     for r in conn.execute(
             "SELECT substr(date,1,7) m, SUM(-amount) v FROM txn WHERE bucket='purchase'"
-            " GROUP BY m"):
+            + mw + " GROUP BY m", ma):
         per_month[r["m"]] = r["v"]
 
     cats = conn.execute(
         "SELECT category, SUM(-amount) v, COUNT(*) n FROM txn WHERE bucket='purchase'"
-        " GROUP BY category ORDER BY v DESC").fetchall()
+        + mw + " GROUP BY category ORDER BY v DESC", ma).fetchall()
     # one list drives donut, legend and table: same rows, same colours, same numbers
     segments = [(c["category"], c["v"], f"hsl({(205 + i * 53) % 360} 32% 45%)")
                 for i, c in enumerate(cats)]
@@ -1038,27 +1064,39 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
     merchants = conn.execute(
         "SELECT m.name, COUNT(*) n, SUM(-t.amount) v FROM txn t"
         " JOIN merchant m ON m.key=t.merchant_key WHERE t.bucket='purchase'"
-        " GROUP BY m.key ORDER BY v DESC LIMIT 8").fetchall()
+        + mw.replace("date", "t.date") + " GROUP BY m.key ORDER BY v DESC LIMIT 8", ma).fetchall()
     statements = s["statements"]
-    days = 0
+    covered: set[date] = set()
     for st in statements:
         if st["period_start"] and st["period_end"]:
             a = date.fromisoformat(st["period_start"])
             b = date.fromisoformat(st["period_end"])
-            days += max((b - a).days + 1, 0)
+            covered.update(a + timedelta(days=i) for i in range(max((b - a).days + 1, 0)))
+    if month:
+        covered = {d for d in covered if d.strftime("%Y-%m") == month}
+    days = len(covered)
     per_day = s["purchases"] / days if days else 0
     unclassified_pct = (100 * s["unclassified"] / s["purchases"]) if s["purchases"] else 0
 
     detail = conn.execute(
         "SELECT date, merchant_raw, category, bucket, amount, check_ok FROM txn"
-        " WHERE bucket <> 'internal' ORDER BY date DESC LIMIT 80").fetchall()
+        " WHERE bucket <> 'internal'" + mw + " ORDER BY date DESC LIMIT 80", ma).fetchall()
 
+    title = "Spese" if not month else f"Spese · {MONTH_NAMES[int(month[5:7])]} {month[:4]}"
+    all_months = [r["m"] for r in conn.execute(
+        "SELECT DISTINCT substr(date,1,7) m FROM txn ORDER BY m")]
+    links = "".join(
+        f"<a href='dashboard-{m}.html'>{MONTH_NAMES[int(m[5:7])][:3]} {m[2:4]}</a>"
+        for m in all_months)
+    nav = ("<nav class='months-nav'>" + ("<a href='dashboard.html'>tutto</a>" if month else "")
+           + links + "</nav>")
     o = [f"<!doctype html><meta charset='utf-8'>"
          f"<meta name='viewport' content='width=device-width,initial-scale=1'>"
-         f"<title>Spese</title><style>{CSS}</style>",
-         "<header><h1>Spese</h1>"
+         f"<title>{title}</title><style>{CSS}</style>",
+         f"<header><h1>{title}</h1>"
          f"<div class='stamp'>{len(months)} mesi · aggiornato {date.today().strftime('%d/%m/%Y')}</div>"
          "</header>",
+         nav,
          "<div class='kpis'>",
          f"<div class='kpi accent'><div class='label'>Acquisti</div>"
          f"<div class='value'>{money(s['purchases'])}</div>"
@@ -1093,7 +1131,7 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
                  f"<div class='v'>{money(m['v'])}</div></li>")
     o.append("</ul>")
 
-    if per_month:
+    if per_month and not month:
         o.append("<h2>Acquisti per mese</h2><div class='months'>")
         top_m = max(per_month.values()) or 1
         for m in sorted(per_month):
@@ -1148,6 +1186,11 @@ def report(conn: sqlite3.Connection, out: Path) -> dict:
 
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("".join(o), encoding="utf-8")
+    if not month:
+        # one page per month beside the complete one, so the SSH service shows them
+        for m in [r["m"] for r in conn.execute(
+                "SELECT DISTINCT substr(date,1,7) m FROM txn ORDER BY m")]:
+            report(conn, out.parent / f"dashboard-{m}.html", month=m)
     try:
         out.chmod(0o600)
     except OSError:
@@ -1174,6 +1217,7 @@ def main() -> None:
     rep = sub.add_parser("report", help="rebuild the dashboard")
     rep.add_argument("--db", type=Path, default=DEFAULT_DB)
     rep.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    rep.add_argument("--month", default="", help="YYYY-MM, solo quel mese")
 
     ls = sub.add_parser("list", help="statements and reconcile status")
     ls.add_argument("--db", type=Path, default=DEFAULT_DB)
@@ -1255,7 +1299,7 @@ def main() -> None:
         results.append(report(conn, a.out))
         print(json.dumps(results, indent=2, ensure_ascii=False))
     elif a.cmd == "report":
-        print(json.dumps(report(conn, a.out), indent=2, ensure_ascii=False))
+        print(json.dumps(report(conn, a.out, a.month), indent=2, ensure_ascii=False))
     elif a.cmd == "list":
         print(json.dumps(summary(conn)["statements"], indent=2, ensure_ascii=False))
     elif a.cmd == "pending":

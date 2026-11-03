@@ -53,11 +53,15 @@ No tables, no category list, no emoji: the dashboard carries the detail.
 - `status: unrecognised` → say the PDF does not look like a statement and that
   nothing was saved.
 
-Always attach the dashboard after a successful import, as its own line:
+After a successful import attach **two** files, each on its own line:
 
 ```
 MEDIA:~/.hermes/finance/dashboard.html
+MEDIA:~/.hermes/finance/dashboard-<YYYY-MM>.html
 ```
+
+The first is everything, the second is the month you just imported. If the user asks for a
+specific month: `finance-ledger report --month 2026-10` and attach that file.
 
 ## Guardare i dati quando servono
 
