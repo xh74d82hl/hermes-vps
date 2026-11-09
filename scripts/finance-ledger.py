@@ -39,7 +39,8 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes"))
 CATEGORIES = [
     "Spesa", "Bar e ristoranti", "Trasporti", "Casa e bollette", "Salute",
     "Shopping", "Abbigliamento", "Casa e arredamento", "Elettronica",
-    "Abbonamenti", "Viaggi", "Svago", "Smoking", "Pagamenti a rate", "Contanti",
+    "Abbonamenti", "Viaggi", "Svago", "Aperitivi e serate", "Smoking",
+    "Pagamenti a rate", "Contanti",
     "Regali", "Tasse e burocrazia",
     "Investimenti", "Entrate", "Rimborsi", "Trasferimenti", "Da classificare",
 ]

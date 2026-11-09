@@ -232,8 +232,8 @@ Tasse e burocrazia, Investimenti, Entrate, Rimborsi, Trasferimenti.
 
 Categorie, incluse quelle nuove: Spesa, Bar e ristoranti, Trasporti, Casa e bollette,
 Salute, Shopping, Abbigliamento, Casa e arredamento, Elettronica, Abbonamenti, Viaggi,
-Svago, Smoking, Pagamenti a rate, Contanti, Regali, Tasse e burocrazia, Investimenti,
-Entrate, Rimborsi, Trasferimenti.
+Svago, Aperitivi e serate, Smoking, Pagamenti a rate, Contanti, Regali,
+Tasse e burocrazia, Investimenti, Entrate, Rimborsi, Trasferimenti.
 
 `Spesa` resta solo supermercati e alimentari. Un negozio di vestiti è `Abbigliamento`,
 il bricolage è `Casa e arredamento`, l'elettronica è `Elettronica`. Il contante
