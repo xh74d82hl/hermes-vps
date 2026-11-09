@@ -359,17 +359,19 @@ CREATE VIEW IF NOT EXISTS txn AS
   FROM fact_feed f
   WHERE f.bucket <> 'duplicate'
     AND (
-      -- after the statement's closing date the feed is the only source
       f.date > COALESCE((SELECT covered_until FROM product_cover WHERE product = f.product),
                         '0000-00-00')
-      -- inside it, a feed row counts only when the statement has no twin for it
-      OR NOT EXISTS (
-        SELECT 1 FROM fact_stmt s
-        WHERE s.product = f.product
-          AND s.bucket <> 'duplicate'
-          AND ABS(s.amount - f.amount) < 0.01
-          AND ABS(julianday(s.date) - julianday(f.date)) <= 2
-      )
+      -- inside the statement period the feed row counts only when the statement has fewer
+      -- identical rows than the feed does: two coffees on the same day stay two
+      OR (SELECT COUNT(*) FROM fact_stmt s
+          WHERE s.product = f.product AND s.bucket <> 'duplicate'
+            AND ABS(s.amount - f.amount) < 0.01
+            AND ABS(julianday(s.date) - julianday(f.date)) <= 2)
+         < (SELECT COUNT(*) FROM fact_feed g
+            WHERE g.product = f.product AND g.bucket <> 'duplicate'
+              AND ABS(g.amount - f.amount) < 0.01
+              AND ABS(julianday(g.date) - julianday(f.date)) <= 2
+              AND g.id <= f.id)
     );
 """
 
@@ -1896,6 +1898,10 @@ def main() -> None:
     rl.add_argument("statement_id")
     rl.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    qy = sub.add_parser("query", help="run a read-only SQL query (for the agent)")
+    qy.add_argument("sql")
+    qy.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     pd = sub.add_parser("periods", help="reconciliation flag per month")
     pd.add_argument("--db", type=Path, default=DEFAULT_DB)
 
@@ -2001,6 +2007,14 @@ def main() -> None:
                      (f"duplicato di {a.statement_id}", a.api_id))
         conn.commit()
         print(f"{a.api_id} marcato duplicato di {a.statement_id}")
+    elif a.cmd == "query":
+        if not a.sql.strip().lower().startswith(("select", "with", "pragma", "explain")):
+            raise SystemExit("solo query in lettura (select/with/pragma/explain)")
+        try:
+            rows = conn.execute(a.sql).fetchmany(200)
+        except sqlite3.Error as exc:
+            raise SystemExit(f"errore SQL: {exc}")
+        print(json.dumps([dict(r) for r in rows], indent=2, ensure_ascii=False, default=str))
     elif a.cmd == "periods":
         rows = conn.execute("SELECT month, reconciled, basis, checked_at, note FROM period"
                             " ORDER BY month").fetchall()
