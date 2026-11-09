@@ -946,6 +946,36 @@ def archive_check(conn: sqlite3.Connection, stmt: dict) -> dict:
         else:
             actual[r["product"]][1] += r["amount"]
 
+    # con il feed bancario attivo i totali per prodotto non sono confrontabili: lo stesso
+    # trasferimento interno compare una volta nell'estratto e una nel feed, con date e
+    # nomi diversi. Il giudice diventa la catena dei saldi.
+    bank_rows = conn.execute(
+        "SELECT COUNT(*) FROM txn WHERE statement_id='bank' AND bucket<>'duplicate'"
+        " AND date BETWEEN ? AND ?", (stmt["period_start"], stmt["period_end"])).fetchone()[0]
+    if bank_rows:
+        balances = {r["kind"]: r["balance"] for r in conn.execute(
+            "SELECT kind, balance FROM account")}
+        checks, notes = [], []
+        for product, exp in expected.items():
+            if product == "totale" or exp.get("closing") is None:
+                continue
+            moved = conn.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND bucket<>'duplicate'"
+                " AND (date > ? OR (date = ? AND statement_id='bank'))",
+                (product, stmt["period_end"], stmt["period_end"])).fetchone()[0]
+            chain = round(float(exp["closing"]) + moved, 2)
+            actual = balances.get("CACC" if product == "conto" else
+                                  "SVGS" if product == "deposito" else "", None)
+            if actual is None:
+                notes.append(f"{product}: catena {chain:.2f}, saldo non disponibile")
+                continue
+            if abs(chain - float(actual)) > 0.02:
+                checks.append(f"{product}: catena {chain:.2f} contro saldo {float(actual):.2f}")
+            else:
+                notes.append(f"{product}: saldo verificato dalla catena ({chain:.2f})")
+        return {"known": True, "ok": not checks, "problems": checks, "notes": notes,
+                "basis": "saldo"}
+
     problems, notes = [], []
     for product, exp in expected.items():
         if product == "totale":
@@ -1018,6 +1048,17 @@ def repair(conn: sqlite3.Connection) -> list[str]:
             (bucket, category, category))
         if cur.rowcount:
             fixed.append(f"{cur.rowcount} righe da acquisto a {bucket}")
+    # rows imported from the bank feed before the internal-name rules existed
+    internal_fixed = 0
+    for row in conn.execute("SELECT id, merchant_raw FROM txn"
+                            " WHERE bucket='purchase' AND statement_id='bank'").fetchall():
+        if INTERNAL_RE.search(row["merchant_raw"] or ""):
+            conn.execute("UPDATE txn SET bucket='internal', category='Trasferimenti'"
+                         " WHERE id=?", (row["id"],))
+            internal_fixed += 1
+    if internal_fixed:
+        fixed.append(f"{internal_fixed} trasferimenti interni riconosciuti a posteriori")
+
     # cash withdrawn is money that will be spent: show it as Contanti, not as a transfer
     cur = conn.execute(
         "UPDATE txn SET bucket='purchase', category='Contanti' WHERE bucket='transfer'"
@@ -1143,11 +1184,11 @@ def reconcile(conn: sqlite3.Connection, days: int = 2) -> list[dict]:
             continue
         extra = [dict(r) for r in conn.execute(
             "SELECT id, product, date, amount, merchant_raw, bank_status FROM txn"
-            " WHERE statement_id='bank' AND date BETWEEN ? AND ?",
+            " WHERE statement_id='bank' AND bucket<>'duplicate' AND date BETWEEN ? AND ?",
             (st["period_start"], st["period_end"]))]
         statement_rows = [dict(r) for r in conn.execute(
             "SELECT id, product, date, amount, merchant_raw FROM txn"
-            " WHERE statement_id=? AND date BETWEEN ? AND ?",
+            " WHERE statement_id=? AND bucket<>'duplicate' AND date BETWEEN ? AND ?",
             (st["id"], st["period_start"], st["period_end"]))]
 
         candidates = []
