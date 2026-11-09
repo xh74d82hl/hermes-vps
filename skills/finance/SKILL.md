@@ -53,6 +53,36 @@ No tables, no category list, no emoji: the dashboard carries the detail.
 - `status: unrecognised` → say the PDF does not look like a statement and that
   nothing was saved.
 
+**Da quando esiste il sync bancario, le fonti sono due e non dicono la stessa cosa.**
+
+| Fonte | Cos'è | Contiene |
+|---|---|---|
+| estratto PDF | una **fotografia** a una data, con saldo di chiusura | i movimenti contabilizzati fino a quel giorno |
+| feed Open Banking | il **flusso**, ogni sabato | anche righe arrivate dopo, verifiche carta a 0 €, trasferimenti interni con nomi inglesi (`To EUR`, `From Conto potenziato`) |
+
+Quindi i totali di un periodo **possono legittimamente differire** dall'estratto: l'estratto non
+può conoscere ciò che è arrivato dopo. Non è un errore e non va "aggiustato" a mano.
+
+Il giudice non è la somma delle uscite, è la **catena dei saldi**: chiusura dell'estratto +
+movimenti successivi. Se quella quadra col saldo del conto, il periodo è sano.
+
+Per riconciliare le due fonti:
+
+```bash
+finance-ledger reconcile
+```
+
+Restituisce, per ogni estratto: le righe arrivate solo dalla banca, le coppie che sembrano lo
+stesso movimento (stesso prodotto, importo, data ±2 giorni) e il saldo che risulterebbe dalla
+catena. Il lavoro dell'agente è **giudicare le coppie**:
+
+```bash
+finance-ledger reconcile-link "<id api>" "<id estratto>"   # è lo stesso movimento
+```
+
+Quello che resta non accoppiato è normale: verifiche a 0, movimenti interni, cose nuove. Non
+marcare come duplicato ciò che non lo è: la riga sparisce dai totali.
+
 **Due controlli, due risposte diverse.** Non sono la stessa cosa e vanno detti separatamente:
 
 | Livello | Domanda | Campo nel JSON |

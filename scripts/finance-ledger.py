@@ -71,7 +71,8 @@ SECTIONS = [
 INTERNAL_BASE = (
     r"conto potenziato|conto deposito|pocket|^deposito$|accredita eur|"
     r"interessi netti|interessi|top ?up|ricarica|"
-    r"investment portfolio|income sorter"
+    r"investment portfolio|income sorter|to eur|from eur|to conto|from conto|"
+    r"^to |^from "
 )
 
 
@@ -203,7 +204,9 @@ class Row:
     def uuid(self) -> str:
         for m in self.meta:
             if m.startswith("ID transazione:"):
-                return m.split(":", 1)[1].strip()
+                found = re.search(
+                    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", m)
+                return found.group(0) if found else ""
         return ""
 
     @property
@@ -936,7 +939,7 @@ def archive_check(conn: sqlite3.Connection, stmt: dict) -> dict:
 
     actual: dict[str, list[float]] = defaultdict(lambda: [0.0, 0.0])
     for r in conn.execute(
-            "SELECT product, amount FROM txn WHERE date BETWEEN ? AND ?",
+            "SELECT product, amount FROM txn WHERE date BETWEEN ? AND ? AND bucket<>'duplicate'",
             (stmt["period_start"], stmt["period_end"])):
         if r["amount"] < 0:
             actual[r["product"]][0] += -r["amount"]
@@ -1122,6 +1125,67 @@ def session_days_left() -> int | None:
     return (when - datetime.datetime.now(datetime.timezone.utc)).days
 
 
+def reconcile(conn: sqlite3.Connection, days: int = 2) -> list[dict]:
+    """Compare the statement (a snapshot) with the bank feed (the flow).
+
+    The statement cannot know about rows pulled later, so totals will differ and that is
+    not an error. What matters: (a) each API-only row is either new or a duplicate of a
+    statement row under a different name/date, and (b) the balance chain still closes.
+    This returns the evidence; the pairing decisions are the agent's job.
+    """
+    out = []
+    for st in conn.execute(
+            "SELECT id, period_start, period_end, summary FROM statement"
+            " WHERE summary IS NOT NULL ORDER BY period_end"):
+        try:
+            summary = json.loads(st["summary"])
+        except (TypeError, ValueError):
+            continue
+        extra = [dict(r) for r in conn.execute(
+            "SELECT id, product, date, amount, merchant_raw, bank_status FROM txn"
+            " WHERE statement_id='bank' AND date BETWEEN ? AND ?",
+            (st["period_start"], st["period_end"]))]
+        statement_rows = [dict(r) for r in conn.execute(
+            "SELECT id, product, date, amount, merchant_raw FROM txn"
+            " WHERE statement_id=? AND date BETWEEN ? AND ?",
+            (st["id"], st["period_start"], st["period_end"]))]
+
+        candidates = []
+        for row in extra:
+            d = date.fromisoformat(row["date"])
+            for other in statement_rows:
+                if other["product"] != row["product"]:
+                    continue
+                if abs(round(other["amount"], 2) - round(row["amount"], 2)) > 0.01:
+                    continue
+                if abs((date.fromisoformat(other["date"]) - d).days) > days:
+                    continue
+                candidates.append({"api": row["id"], "statement": other["id"],
+                                   "amount": row["amount"]})
+                break
+        paired = {c["api"] for c in candidates}
+        unmatched = [r for r in extra if r["id"] not in paired]
+
+        # the balance chain is the real referee: statement closing + later movements
+        balance_ok = {}
+        for product, exp in summary.items():
+            if product == "totale":
+                continue
+            closing = exp.get("closing")
+            if closing is None:
+                continue
+            moved = conn.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND date > ? AND bucket<>'duplicate'",
+                (product, st["period_end"])).fetchone()[0]
+            balance_ok[product] = round(float(closing) + moved, 2)
+        out.append({"period": f"{st['period_start']}..{st['period_end']}",
+                    "extra_from_bank": len(extra),
+                    "likely_duplicates": candidates,
+                    "unmatched": unmatched,
+                    "balance_if_chain_holds": balance_ok})
+    return out
+
+
 def derived_balance(conn: sqlite3.Connection, product: str) -> tuple[float, str] | None:
     """Balance from the last statement closing plus movements after it.
 
@@ -1144,8 +1208,8 @@ def derived_balance(conn: sqlite3.Connection, product: str) -> tuple[float, str]
         return None
     end, closing = best
     moved = conn.execute(
-        "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND date > ?",
-        (product, end)).fetchone()[0]
+        "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND date > ?"
+        " AND bucket<>'duplicate'", (product, end)).fetchone()[0]
     return round(closing + moved, 2), f"derivato: chiusura {end} + movimenti successivi"
 
 
@@ -1204,6 +1268,8 @@ def bank_sync(conn: sqlite3.Connection, days_back: int = 30) -> dict:
                 if not ref:
                     continue
                 amt = float((t.get("transaction_amount") or {}).get("amount") or 0)
+                if amt == 0:
+                    continue          # card checks and authorisations, not movements
                 if (t.get("credit_debit_indicator") or "DBIT") == "DBIT":
                     amt = -abs(amt)
                 raw = ((t.get("creditor") or {}).get("name")
@@ -1447,7 +1513,7 @@ def report(conn: sqlite3.Connection, out: Path, month: str = "") -> dict:
 
     detail = conn.execute(
         "SELECT date, merchant_raw, category, bucket, amount, check_ok FROM txn"
-        " WHERE bucket <> 'internal'" + mw + " ORDER BY date DESC LIMIT 80", ma).fetchall()
+        " WHERE bucket NOT IN ('internal','duplicate')" + mw + " ORDER BY date DESC LIMIT 80", ma).fetchall()
 
     title = "Spese" if not month else f"Spese · {MONTH_NAMES[int(month[5:7])]} {month[:4]}"
     all_months = [r["m"] for r in conn.execute(
@@ -1656,6 +1722,15 @@ def main() -> None:
     al.add_argument("--db", type=Path, default=DEFAULT_DB)
     al.add_argument("--uid", default="")
 
+    rl = sub.add_parser("reconcile-link",
+                        help="mark an API row as the duplicate of a statement row")
+    rl.add_argument("api_id")
+    rl.add_argument("statement_id")
+    rl.add_argument("--db", type=Path, default=DEFAULT_DB)
+
+    rc = sub.add_parser("reconcile", help="statement vs bank feed: the evidence to judge")
+    rc.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     bs = sub.add_parser("bank-sync", help="pull the bank feed into the ledger")
     bs.add_argument("--db", type=Path, default=DEFAULT_DB)
     bs.add_argument("--days", type=int, default=30)
@@ -1748,6 +1823,15 @@ def main() -> None:
         print(json.dumps(subscriptions(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "anomalies":
         print(json.dumps(anomalies(conn), indent=2, ensure_ascii=False))
+    elif a.cmd == "reconcile-link":
+        if not conn.execute("SELECT 1 FROM txn WHERE id=?", (a.api_id,)).fetchone():
+            raise SystemExit(f"id non trovato: {a.api_id}")
+        conn.execute("UPDATE txn SET bucket='duplicate', note=? WHERE id=?",
+                     (f"duplicato di {a.statement_id}", a.api_id))
+        conn.commit()
+        print(f"{a.api_id} marcato duplicato di {a.statement_id}")
+    elif a.cmd == "reconcile":
+        print(json.dumps(reconcile(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "account-label":
         row = (conn.execute("SELECT uid FROM account WHERE uid=?", (a.uid,)).fetchone()
                if a.uid else
