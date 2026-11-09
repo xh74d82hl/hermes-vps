@@ -63,6 +63,9 @@ No tables, no category list, no emoji: the dashboard carries the detail.
 Quindi i totali di un periodo **possono legittimamente differire** dall'estratto: l'estratto non
 può conoscere ciò che è arrivato dopo. Non è un errore e non va "aggiustato" a mano.
 
+Il flag che conta è nel database, tabella `period`: `reconciled` 1 o 0 per mese, con la
+base usata (`saldo` o `totali`) e la data del controllo. `finance-ledger periods` lo mostra.
+
 Il giudice non è la somma delle uscite, è la **catena dei saldi**: chiusura dell'estratto +
 movimenti successivi. Se quella quadra col saldo del conto, il periodo è sano.
 

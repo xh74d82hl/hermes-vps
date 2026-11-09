@@ -184,7 +184,6 @@ CREATE TABLE IF NOT EXISTS account (
     currency    TEXT,
     updated_at  TEXT
 );
-CREATE INDEX IF NOT EXISTS txn_date ON txn(date);
 """
 
 
@@ -343,6 +342,92 @@ def bucket_for(amount: float, merchant: str) -> str:
 # --------------------------------------------------------------------------- db
 
 
+V2_VIEW = """
+CREATE VIEW IF NOT EXISTS txn AS
+  SELECT f.id, f.statement_id, f.product, f.date, f.amount, f.balance_after,
+         f.amount_printed, f.check_ok, f.merchant_raw, f.merchant_key,
+         COALESCE((SELECT category FROM merchant m WHERE m.key = f.merchant_key), f.category)
+           AS category,
+         f.bucket, f.note, f.bank_status
+  FROM fact_stmt f
+  WHERE f.bucket <> 'duplicate'
+  UNION ALL
+  SELECT f.id, 'bank', f.product, f.date, f.amount, NULL, NULL, 1,
+         f.merchant_raw, f.merchant_key,
+         COALESCE((SELECT category FROM merchant m WHERE m.key = f.merchant_key), f.category),
+         f.bucket, f.note, f.bank_status
+  FROM fact_feed f
+  WHERE f.bucket <> 'duplicate'
+    AND (
+      -- after the statement's closing date the feed is the only source
+      f.date > COALESCE((SELECT covered_until FROM product_cover WHERE product = f.product),
+                        '0000-00-00')
+      -- inside it, a feed row counts only when the statement has no twin for it
+      OR NOT EXISTS (
+        SELECT 1 FROM fact_stmt s
+        WHERE s.product = f.product
+          AND s.bucket <> 'duplicate'
+          AND ABS(s.amount - f.amount) < 0.01
+          AND ABS(julianday(s.date) - julianday(f.date)) <= 2
+      )
+    );
+"""
+
+
+def _is_table(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute("SELECT type FROM sqlite_master WHERE name=?", (name,)).fetchone()
+    return bool(row and row["type"] == "table")
+
+
+def ensure_v2(conn: sqlite3.Connection) -> None:
+    """Split one mixed txn table into facts per source, then expose the old name as a view.
+
+    Statement rows are the closed book up to their closing date; feed rows are the open
+    book after it. Keeping them apart makes duplicates impossible by construction, while
+    every existing query keeps reading `txn`.
+    """
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS fact_stmt (
+            id TEXT PRIMARY KEY, statement_id TEXT, product TEXT, date TEXT, amount REAL,
+            balance_after REAL, amount_printed REAL, check_ok INTEGER DEFAULT 1,
+            merchant_raw TEXT, merchant_key TEXT, category TEXT, bucket TEXT, note TEXT,
+            bank_status TEXT);
+        CREATE TABLE IF NOT EXISTS fact_feed (
+            id TEXT PRIMARY KEY, statement_id TEXT DEFAULT 'bank', product TEXT, date TEXT,
+            amount REAL, balance_after REAL, amount_printed REAL, check_ok INTEGER DEFAULT 1,
+            merchant_raw TEXT, merchant_key TEXT, category TEXT, bucket TEXT, note TEXT,
+            bank_status TEXT);
+        CREATE TABLE IF NOT EXISTS product_cover (
+            product TEXT PRIMARY KEY, covered_until TEXT);
+        CREATE TABLE IF NOT EXISTS period (
+            month TEXT PRIMARY KEY,
+            reconciled INTEGER NOT NULL DEFAULT 0,
+            basis TEXT,
+            checked_at TEXT,
+            note TEXT);
+    """)
+    if _is_table(conn, "txn"):
+        conn.execute("INSERT OR IGNORE INTO fact_stmt SELECT * FROM txn WHERE statement_id<>'bank'")
+        conn.execute("INSERT OR IGNORE INTO fact_feed SELECT * FROM txn WHERE statement_id='bank'")
+        for row in conn.execute("SELECT DISTINCT product FROM txn"):
+            end = conn.execute(
+                "SELECT MAX(period_end) FROM statement WHERE summary LIKE ?",
+                (f'%"{row["product"]}"%',)).fetchone()[0]
+            if end:
+                conn.execute("INSERT INTO product_cover (product, covered_until) VALUES (?,?)"
+                             " ON CONFLICT(product) DO UPDATE SET covered_until="
+                             " MAX(covered_until, excluded.covered_until)", (row["product"], end))
+        conn.execute("ALTER TABLE txn RENAME TO txn_v1")
+    conn.execute("DROP VIEW IF EXISTS txn")
+    conn.executescript(V2_VIEW)
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS fact_stmt_date ON fact_stmt(date);
+        CREATE INDEX IF NOT EXISTS fact_feed_date ON fact_feed(date);
+        CREATE INDEX IF NOT EXISTS fact_feed_merchant ON fact_feed(merchant_key);
+    """)
+    conn.commit()
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
@@ -352,6 +437,7 @@ def connect(path: Path) -> sqlite3.Connection:
         pass
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    ensure_v2(conn)
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(merchant)")}
     stmt_cols = {r["name"] for r in conn.execute("PRAGMA table_info(statement)")}
     for column, decl in (("seen", "INTEGER NOT NULL DEFAULT 0"), ("summary", "TEXT")):
@@ -419,7 +505,7 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
         known = conn.execute("SELECT category FROM merchant WHERE key=?", (key,)).fetchone()
         category = known["category"] if known else contract_category(bucket)
         cur = conn.execute(
-            "INSERT OR IGNORE INTO txn (id, statement_id, product, date, amount, balance_after,"
+            "INSERT OR IGNORE INTO fact_stmt (id, statement_id, product, date, amount, balance_after,"
             " amount_printed, check_ok, merchant_raw, merchant_key, category, bucket)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (txid, digest, row.product, row.date, amount, balance_after, printed, 1 if ok else 0,
@@ -465,6 +551,14 @@ def ingest(conn: sqlite3.Connection, pdf: Path) -> dict:
         y, mo, d = (int(x) for x in st.period_end.split("-"))
         if d < MONTH_DAYS[mo] or int(st.period_start[-2:]) > 1:
             partial = 1
+
+    for product in st.summary:
+        if product == "totale":
+            continue
+        conn.execute("INSERT INTO product_cover (product, covered_until) VALUES (?,?)"
+                     " ON CONFLICT(product) DO UPDATE SET covered_until="
+                     " MAX(covered_until, excluded.covered_until)",
+                     (product, st.period_end))
 
     reconciled = 0 if problems else 1
     conn.execute(
@@ -548,8 +642,7 @@ def classify(conn: sqlite3.Connection, key: str, name: str, category: str,
         " ateco=COALESCE(NULLIF(excluded.ateco,''), merchant.ateco),"
         " source=COALESCE(NULLIF(excluded.source,''), merchant.source)",
         (key, name, category, confidence, by, date.today().isoformat(), ateco, source))
-    conn.execute("UPDATE txn SET category=? WHERE merchant_key=? AND bucket='purchase'",
-                 (category, key))
+    pass  # the view reads the category from this table
     conn.commit()
 
 
@@ -561,8 +654,7 @@ def unclassify(conn: sqlite3.Connection, by: str = "", key: str = "") -> int:
     else:
         cur = conn.execute("UPDATE merchant SET category='Da classificare', confidence=0,"
                            " resolved_by='', asked_at=NULL WHERE resolved_by=?", (by,))
-    conn.execute("UPDATE txn SET category='Da classificare' WHERE bucket='purchase'"
-                 " AND merchant_key IN (SELECT key FROM merchant WHERE category='Da classificare')")
+    pass  # same: nothing to rewrite on the fact tables
     conn.commit()
     return cur.rowcount
 
@@ -1044,16 +1136,19 @@ def repair(conn: sqlite3.Connection) -> list[str]:
     for bucket, category in (("transfer", "Trasferimenti"), ("income", "Entrate"),
                              ("refund", "Rimborsi"), ("internal", "Trasferimenti")):
         cur = conn.execute(
-            "UPDATE txn SET bucket=?, category=? WHERE bucket='purchase' AND category=?",
+            "UPDATE fact_stmt SET bucket=?, category=? WHERE bucket='purchase' AND category=?",
+            (bucket, category, category))
+        conn.execute(
+            "UPDATE fact_feed SET bucket=?, category=? WHERE bucket='purchase' AND category=?",
             (bucket, category, category))
         if cur.rowcount:
             fixed.append(f"{cur.rowcount} righe da acquisto a {bucket}")
     # rows imported from the bank feed before the internal-name rules existed
     internal_fixed = 0
-    for row in conn.execute("SELECT id, merchant_raw FROM txn"
-                            " WHERE bucket='purchase' AND statement_id='bank'").fetchall():
+    for row in conn.execute("SELECT id, merchant_raw FROM fact_feed"
+                            " WHERE bucket='purchase'").fetchall():
         if INTERNAL_RE.search(row["merchant_raw"] or ""):
-            conn.execute("UPDATE txn SET bucket='internal', category='Trasferimenti'"
+            conn.execute("UPDATE fact_feed SET bucket='internal', category='Trasferimenti'"
                          " WHERE id=?", (row["id"],))
             internal_fixed += 1
     if internal_fixed:
@@ -1061,7 +1156,7 @@ def repair(conn: sqlite3.Connection) -> list[str]:
 
     # cash withdrawn is money that will be spent: show it as Contanti, not as a transfer
     cur = conn.execute(
-        "UPDATE txn SET bucket='purchase', category='Contanti' WHERE bucket='transfer'"
+        "UPDATE fact_stmt SET bucket='purchase', category='Contanti' WHERE bucket='transfer'"
         " AND merchant_key IN (SELECT key FROM merchant WHERE category='Contanti')")
     if cur.rowcount:
         fixed.append(f"{cur.rowcount} prelievi spostati in Contanti")
@@ -1219,12 +1314,44 @@ def reconcile(conn: sqlite3.Connection, days: int = 2) -> list[dict]:
                 "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND date > ? AND bucket<>'duplicate'",
                 (product, st["period_end"])).fetchone()[0]
             balance_ok[product] = round(float(closing) + moved, 2)
+        chain_ok = True
+        for product in summary:
+            if product == "totale":
+                continue
+            closing = summary[product].get("closing")
+            if closing is None:
+                continue
+            moved = conn.execute(
+                "SELECT COALESCE(SUM(amount),0) FROM txn WHERE product=? AND bucket<>'duplicate'"
+                " AND (date > ? OR (date = ? AND statement_id='bank'))",
+                (product, st["period_end"], st["period_end"])).fetchone()[0]
+            chain = round(float(closing) + moved, 2)
+            actual = conn.execute(
+                "SELECT balance FROM account WHERE kind=?",
+                ("CACC" if product == "conto" else "SVGS" if product == "deposito" else "",)
+            ).fetchone()
+            if actual and abs(chain - float(actual[0])) > 0.02:
+                chain_ok = False
+        if chain_ok:
+            mark_period(conn, st["period_start"][:7], True, "saldo",
+                        f"catena dei saldi verificata al {date.today().isoformat()}")
         out.append({"period": f"{st['period_start']}..{st['period_end']}",
                     "extra_from_bank": len(extra),
                     "likely_duplicates": candidates,
                     "unmatched": unmatched,
                     "balance_if_chain_holds": balance_ok})
     return out
+
+
+def mark_period(conn: sqlite3.Connection, month: str, ok: bool, basis: str, note: str = "") -> None:
+    """The flag the user asked for: is this month reconciled, and on what basis."""
+    conn.execute(
+        "INSERT INTO period (month, reconciled, basis, checked_at, note) VALUES (?,?,?,?,?)"
+        " ON CONFLICT(month) DO UPDATE SET reconciled=excluded.reconciled,"
+        " basis=excluded.basis, checked_at=excluded.checked_at, note=excluded.note",
+        (month, 1 if ok else 0, basis,
+         date.today().isoformat(), note[:300]))
+    conn.commit()
 
 
 def derived_balance(conn: sqlite3.Connection, product: str) -> tuple[float, str] | None:
@@ -1323,14 +1450,14 @@ def bank_sync(conn: sqlite3.Connection, days_back: int = 30) -> dict:
                 bucket = bucket_for(amt, raw)
                 category = known["category"] if known else contract_category(bucket)
                 txid = f"{ref}:{product}"
-                existing = conn.execute("SELECT id FROM txn WHERE id=?", (txid,)).fetchone()
+                existing = conn.execute("SELECT id FROM fact_feed WHERE id=?", (txid,)).fetchone()
                 if existing:
-                    conn.execute("UPDATE txn SET bank_status=? WHERE id=?",
+                    conn.execute("UPDATE fact_feed SET bank_status=? WHERE id=?",
                                  (t.get("status"), txid))
                     updated += 1
                     continue
                 conn.execute(
-                    "INSERT INTO txn (id, statement_id, product, date, amount, merchant_raw,"
+                    "INSERT INTO fact_feed (id, statement_id, product, date, amount, merchant_raw,"
                     " merchant_key, category, bucket, bank_status)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (txid, "bank", product, t.get("booking_date") or since, amt, raw,
@@ -1769,6 +1896,9 @@ def main() -> None:
     rl.add_argument("statement_id")
     rl.add_argument("--db", type=Path, default=DEFAULT_DB)
 
+    pd = sub.add_parser("periods", help="reconciliation flag per month")
+    pd.add_argument("--db", type=Path, default=DEFAULT_DB)
+
     rc = sub.add_parser("reconcile", help="statement vs bank feed: the evidence to judge")
     rc.add_argument("--db", type=Path, default=DEFAULT_DB)
 
@@ -1867,10 +1997,19 @@ def main() -> None:
     elif a.cmd == "reconcile-link":
         if not conn.execute("SELECT 1 FROM txn WHERE id=?", (a.api_id,)).fetchone():
             raise SystemExit(f"id non trovato: {a.api_id}")
-        conn.execute("UPDATE txn SET bucket='duplicate', note=? WHERE id=?",
+        conn.execute("UPDATE fact_feed SET bucket='duplicate', note=? WHERE id=?",
                      (f"duplicato di {a.statement_id}", a.api_id))
         conn.commit()
         print(f"{a.api_id} marcato duplicato di {a.statement_id}")
+    elif a.cmd == "periods":
+        rows = conn.execute("SELECT month, reconciled, basis, checked_at, note FROM period"
+                            " ORDER BY month").fetchall()
+        if not rows:
+            print("nessun periodo segnato: esegui reconcile")
+        for r in rows:
+            mark = "riconciliato" if r["reconciled"] else "NON riconciliato"
+            print(f"{r['month']}  {mark:<16} {r['basis'] or '-':<6} {r['checked_at'] or '-'}"
+                  f"  {r['note'] or ''}")
     elif a.cmd == "reconcile":
         print(json.dumps(reconcile(conn), indent=2, ensure_ascii=False))
     elif a.cmd == "account-label":
